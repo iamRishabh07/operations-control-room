@@ -4,6 +4,9 @@
 !.env.example
 *.pem
 *.key
+# Claude Code: personal/local overrides
+CLAUDE.local.md
+.claude/settings.local.json
 # Local SQLite files
 *.db
 *.db-*
@@ -25,3 +28,32 @@ coverage.out
 # Generated large data; commit only small fixtures and scripts
 /data/raw/
 /data/downloads/
+
+# SQLite runtime DB (seed/manifest are committed)
+/data/control.db
+/data/control.db-*
+# Frontend build artefacts
+/frontend/node_modules/
+/frontend/dist/
+# Plugin / tooling session artefacts (not product code)
+/.agents/
+/skills-lock.json
+/memory.md
+/DESIGN.md
+/docs/references/
+/scripts/__pycache__/
+/.claude/hooks/__pycache__/
+/frontend/tsconfig.tsbuildinfo
+# Installed Claude Code skills/agents from third-party plugins that are not
+# part of this project's committed setup; keep only the reviewer agents and
+# the project-specific skills used during the take-home.
+/.claude/skills/*
+!/.claude/skills/brief-audit/
+!/.claude/skills/failure-lab/
+!/.claude/skills/go-service/
+!/.claude/skills/interview-defense/
+!/.claude/skills/one-action-ui/
+!/.claude/skills/plan-slice/
+!/.claude/skills/submission-audit/
+!/.claude/skills/sql-proof/
+/.claude/agents/impeccable-*.md
