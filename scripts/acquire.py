@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, explicit acquisition of the approved 2025 published aggregates."""
+"""Bounded, explicit acquisition of the assignment-linked 2022 archived aggregates."""
 import argparse
 import datetime as dt
 import json
@@ -10,9 +10,9 @@ import time
 import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = "https://data.cityofchicago.org/resource/6dvr-xwnh.json"
+BASE = "https://data.cityofchicago.org/resource/m6dm-c72p.json"
 BOUNDARIES = "https://data.cityofchicago.org/resource/jcxq-k9xf.json"
-PERIOD = "trip_start_timestamp >= '2025-01-01T00:00:00' AND trip_start_timestamp < '2026-01-01T00:00:00'"
+PERIOD = "trip_start_timestamp >= '2022-01-01T00:00:00' AND trip_start_timestamp < '2023-01-01T00:00:00'"
 VALID = "pickup_community_area between 1 and 77"
 SELECT = "pickup_community_area as area_id,date_extract_dow(trip_start_timestamp) as dow,date_extract_hh(trip_start_timestamp) as hour,count(*) as trips"
 GROUP = "pickup_community_area,date_extract_dow(trip_start_timestamp),date_extract_hh(trip_start_timestamp)"
@@ -38,9 +38,9 @@ class Fetch:
             raise RuntimeError("60-second acquisition budget exhausted")
         self.queries.append(url)
         print("Fetching", url, flush=True)
-        result = subprocess.run(["curl", "--fail", "--silent", "--show-error", "--max-time", str(remaining), "--max-filesize", str(10_000_000-self.size), url], capture_output=True, timeout=remaining+1)
+        result = subprocess.run(["curl", "--fail-with-body", "--silent", "--show-error", "--max-time", str(remaining), "--max-filesize", str(10_000_000-self.size), url], capture_output=True, timeout=remaining+1)
         if result.returncode:
-            raise RuntimeError(result.stderr.decode().strip())
+            raise RuntimeError(result.stderr.decode().strip() + "\n" + result.stdout[:1000].decode(errors="replace"))
         self.size += len(result.stdout)
         if self.size > 10_000_000:
             raise RuntimeError("10 MB acquisition budget exceeded")
@@ -58,18 +58,21 @@ def main():
     parser.add_argument("--monthly", action="store_true", help="Separate explicit monthly attempt, same total budget")
     args = parser.parse_args()
     get = Fetch()
-    meta = get("https://data.cityofchicago.org/api/views/6dvr-xwnh/columns.json")
+    meta = get("https://data.cityofchicago.org/api/views/m6dm-c72p/columns.json")
     columns = {c["fieldName"]: c for c in meta}
-    assert columns["trip_start_timestamp"]["dataTypeName"] == "calendar_date", "timestamp semantics changed"
-    assert columns["pickup_community_area"]["dataTypeName"] == "number", "area schema changed"
-    known = get(BASE, {"$select":"date_extract_dow('2025-01-05T12:00:00'::floating_timestamp) as dow,date_extract_hh('2025-01-05T12:00:00'::floating_timestamp) as hour", "$limit":1})
-    assert integer(known[0]["dow"]) == 0 and integer(known[0]["hour"]) == 12, "weekday/hour extraction mismatch"
+    if columns["trip_start_timestamp"]["dataTypeName"] != "calendar_date":
+        raise ValueError("timestamp semantics changed")
+    if columns["pickup_community_area"]["dataTypeName"] != "number":
+        raise ValueError("area schema changed")
+    known = get(BASE, {"$select":"date_extract_dow(trip_start_timestamp) as dow,date_extract_hh(trip_start_timestamp) as hour", "$where":"trip_start_timestamp = '2022-01-02T12:00:00'", "$limit":1})
+    if len(known) != 1 or integer(known[0]["dow"]) != 0 or integer(known[0]["hour"]) != 12:
+        raise ValueError("weekday/hour extraction mismatch")
     periods = [PERIOD]
     if args.monthly:
         periods = []
         for month in range(1,13):
-            start = dt.date(2025,month,1)
-            end = dt.date(2025,month+1,1) if month < 12 else dt.date(2026,1,1)
+            start = dt.date(2022,month,1)
+            end = dt.date(2022,month+1,1) if month < 12 else dt.date(2023,1,1)
             periods.append(f"trip_start_timestamp >= '{start}T00:00:00' AND trip_start_timestamp < '{end}T00:00:00'")
     totals = {}
     for period in periods:
@@ -99,11 +102,13 @@ def main():
             raise ValueError("point outside Chicago bounds")
         areas.append(dict(area_id=area_id,name=row["community"].title(),lat=lat,lon=lon,coord_source=BOUNDARIES+"; bounding-box center; approximate"))
     areas.sort(key=lambda a:a["area_id"])
-    assert [a["area_id"] for a in areas] == list(range(1,78)), "area coverage mismatch"
+    if [a["area_id"] for a in areas] != list(range(1,78)):
+        raise ValueError("area coverage mismatch")
     buckets = [dict(area_id=a,dow=d,hour=h,total_trips=totals.get((a,d,h),0)) for a in range(1,78) for d in range(7) for h in range(24)]
-    manifest = dict(dataset_id="6dvr-xwnh",period_start="2025-01-01",period_end="2025-12-31",retrieved_at=dt.datetime.now(dt.timezone.utc).isoformat(),query_text=json.dumps(get.queries, separators=(",",":")),rows_loaded=len(buckets),trips_included=included,trips_excluded_invalid_area=excluded)
+    manifest = dict(dataset_id="m6dm-c72p",period_start="2022-01-01",period_end="2022-12-31",retrieved_at=dt.datetime.now(dt.timezone.utc).isoformat(),query_text=json.dumps(get.queries, separators=(",",":")),rows_loaded=len(buckets),trips_included=included,trips_excluded_invalid_area=excluded)
     seed = dict(areas=areas,buckets=buckets,history=manifest)
     # Publish only after every source and integrity check succeeds.
+    (ROOT / "data").mkdir(parents=True, exist_ok=True)
     temp = ROOT / "data/seed.json.tmp"
     temp.write_text(json.dumps(seed,separators=(",",":"))+"\n")
     temp.replace(ROOT / "data/seed.json")

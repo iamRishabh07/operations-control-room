@@ -1,0 +1,12 @@
+{
+  "dataset_id": "dev-baseline-v1",
+  "period_end": "2022-12-31",
+  "period_start": "2022-01-01",
+  "query_text": "synthetic weekday/hour profile; hash=28589e2cd5528fc5",
+  "retrieved_at": "1970-01-01T00:00:00+00:00",
+  "rows_loaded": 12936,
+  "synthetic": true,
+  "synthetic_notice": "Deterministic development baseline. Chicago TNP portal grouped-query path was unresponsive at submission preparation; see docs/decisions.md. Replace by running `make acquire` once the portal recovers.",
+  "trips_excluded_invalid_area": 0,
+  "trips_included": 43613853
+}
