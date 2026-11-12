@@ -1,0 +1,27 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Local SQLite files
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+# Node / output
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+# Go / coverage
+*.test
+coverage.out
+# OS / editor
+.DS_Store
+.idea/
+.vscode/settings.json
+# Generated large data; commit only small fixtures and scripts
+/data/raw/
+/data/downloads/
