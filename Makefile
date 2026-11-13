@@ -1,50 +1,59 @@
-.PHONY: setup run acquire acquire-monthly bootstrap-dev-seed test-acquire test lint build clean
+.PHONY: setup run demo acquire test test-acquire lint build clean
 
+# Listed explicitly: a bare ./... from the repo root also picks up Go files inside node_modules.
+GO_PKGS = ./api/... ./backend/... ./data/...
+
+# ARGS passes extra server flags, e.g. make run ARGS="-weather-url http://127.0.0.1:9/"
+SERVE = cd backend && go run ./cmd/server -seed ../data/seed.json -db ../data/control.db -static ../frontend/dist $(ARGS)
+
+# The local database holds only rows loaded from the seed, so setup always
+# rebuilds it: one command converges whatever state it was in.
 setup:
+	@test -f data/seed.json || { echo "data/seed.json is missing. It is committed: restore it with 'git checkout data/seed.json' or rebuild it with 'make acquire'."; exit 1; }
 	@echo "→ fetching Go dependencies"
-	@cd backend && go mod download
+	@go mod download
 	@echo "→ installing frontend dependencies"
 	@cd frontend && npm ci
 	@echo "→ building frontend"
 	@cd frontend && npm run build
-	@echo "→ ensuring data/ seed exists"
-	@test -f data/seed.json || $(MAKE) bootstrap-dev-seed
-	@echo "→ initializing local SQLite"
+	@echo "→ building local SQLite from the seed"
+	@rm -f data/control.db data/control.db-shm data/control.db-wal
 	@cd backend && go run ./cmd/server -init-only -seed ../data/seed.json -db ../data/control.db
 	@echo "✓ setup complete — run 'make run'"
 
 run:
-	@cd backend && go run ./cmd/server -seed ../data/seed.json -db ../data/control.db -static ../frontend/dist
+	@$(SERVE)
 
-# Full real-source acquisition (bounded 60s/10MB). Requires Chicago data portal
-# to respond to grouped queries. See scripts/acquire.py.
+# Show the action state on a dry day. Everything is real except the weather
+# feed, which comes from a local simulator; the API and the UI label it.
+demo:
+	@python3 scripts/sim_weather.py --precip 0.6 & SIM=$$!; \
+	trap 'kill $$SIM 2>/dev/null' EXIT INT TERM; \
+	$(SERVE) -weather-url http://127.0.0.1:9099/
+
+# Rebuild data/seed.json from the Chicago data portal. Maintainers only: the
+# seed is committed. Resumable, so rerun it until it prints PASS.
 acquire:
 	python3 scripts/acquire.py
 
-acquire-monthly:
-	python3 scripts/acquire.py --monthly
-
-# Deterministic development baseline (labelled synthetic in UI). Used when
-# `make acquire` cannot reach the Chicago data portal.
-bootstrap-dev-seed:
-	python3 scripts/bootstrap_dev_seed.py
-
 test-acquire:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'
 
-test:
-	cd backend && go test ./... -count=1
-	cd backend && go vet ./...
+test: test-acquire
+	go test $(GO_PKGS) -count=1
+	go vet $(GO_PKGS)
 	cd frontend && npm run lint
+	cd frontend && npm run typecheck
+	cd frontend && npm test
 
 lint:
-	cd backend && go vet ./...
+	go vet $(GO_PKGS)
 	cd frontend && npm run lint
 
 build:
-	cd backend && go build ./...
+	go build $(GO_PKGS)
 	cd frontend && npm run build
 
 clean:
-	rm -f data/control.db
+	rm -f data/control.db data/control.db-shm data/control.db-wal
 	rm -rf frontend/dist frontend/node_modules

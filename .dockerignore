@@ -1,0 +1,8 @@
+.git
+**/node_modules
+frontend/dist
+data/raw
+data/control.db*
+docs
+.claude
+.agents

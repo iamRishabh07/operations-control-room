@@ -42,11 +42,11 @@ coverage.out
 /DESIGN.md
 /docs/references/
 /scripts/__pycache__/
+/frontend/.taste-skill/
 /.claude/hooks/__pycache__/
 /frontend/tsconfig.tsbuildinfo
-# Installed Claude Code skills/agents from third-party plugins that are not
-# part of this project's committed setup; keep only the reviewer agents and
-# the project-specific skills used during the take-home.
+# Claude Code skills and agents installed from third-party plugins stay local;
+# only the project's own skills and reviewer agents are committed.
 /.claude/skills/*
 !/.claude/skills/brief-audit/
 !/.claude/skills/failure-lab/
