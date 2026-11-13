@@ -1,41 +1,99 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Assessment, AssessmentError, Candidate, fetchAssessment } from './api'
+import { Assessment, AssessmentError, deadlineFor, fetchAssessment } from './api'
+import { chicagoClock } from './format'
+import { Hero } from './components/Hero'
+import { CandidatesBoard } from './components/CandidatesBoard'
+import { Provenance } from './components/Provenance'
+import { Limits } from './components/Limits'
 
+// What the latest refresh did while an assessment stays on screen.
+type Refresh = { kind: 'idle' } | { kind: 'pending' } | { kind: 'failed'; message: string }
+
+// loading and error mean there is no assessment to show. Once one has arrived
+// it stays on screen until a newer one replaces it: a refresh runs, or fails,
+// beside it. deadline is when it stops being current, on this browser's clock.
 type ViewState =
   | { kind: 'loading' }
-  | { kind: 'ready'; assessment: Assessment; expired: boolean }
   | { kind: 'error'; message: string }
+  | { kind: 'ready'; assessment: Assessment; deadline: number | null; expired: boolean; refresh: Refresh }
 
 const REQUEST_TIMEOUT_MS = 5_000
+
+// The page re-checks by itself: shortly before an assessment expires, and a
+// minute after an unavailable answer or a failed request. The minimum gap
+// keeps a response with almost no validity left from causing rapid requests.
+const RECHECK_LEAD_MS = 10_000
+const RECHECK_RETRY_MS = 60_000
+const RECHECK_MIN_GAP_MS = 5_000
+
+const isPast = (deadline: number | null) => deadline !== null && Date.now() >= deadline
 
 export function App() {
   const [view, setView] = useState<ViewState>({ kind: 'loading' })
   const abortRef = useRef<AbortController | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recheckAtRef = useRef<number | null>(null) // when the next automatic request is due
 
-  const refresh = useCallback(async () => {
+  // background is true for the page's own re-checks. They change nothing on
+  // screen until they finish, so a notice already shown is not removed and
+  // announced again every minute during an outage.
+  const refresh = useCallback(async (background = false) => {
     abortRef.current?.abort()
-    if (timerRef.current) clearTimeout(timerRef.current)
+    if (recheckTimerRef.current) clearTimeout(recheckTimerRef.current)
+    recheckAtRef.current = null
     const ctrl = new AbortController()
     abortRef.current = ctrl
-    setView({ kind: 'loading' })
-    const timeout = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
+    if (!background) {
+      setView((v) => (v.kind === 'ready' ? { ...v, refresh: { kind: 'pending' } } : { kind: 'loading' }))
+    }
+    const requestedAt = Date.now()
+    // A hidden tab makes no request; the visibility handler catches up when it is shown.
+    const recheckAt = (at: number) => {
+      if (recheckTimerRef.current) clearTimeout(recheckTimerRef.current)
+      recheckAtRef.current = at
+      recheckTimerRef.current = setTimeout(
+        () => {
+          if (document.visibilityState === 'visible') refresh(true)
+        },
+        Math.max(0, at - Date.now()),
+      )
+    }
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      ctrl.abort()
+    }, REQUEST_TIMEOUT_MS)
     try {
       const assessment = await fetchAssessment(ctrl.signal)
-      const now = Date.now()
-      const validUntil = assessment.valid_until ? Date.parse(assessment.valid_until) : NaN
-      const expired = assessment.status !== 'unavailable' && Number.isFinite(validUntil) && validUntil <= now
-      setView({ kind: 'ready', assessment, expired })
-      if (!expired && Number.isFinite(validUntil)) {
-        timerRef.current = setTimeout(
-          () => setView((v) => (v.kind === 'ready' ? { ...v, expired: true } : v)),
-          Math.max(0, validUntil - now),
-        )
-      }
+      const deadline = deadlineFor(assessment, requestedAt)
+      const expired = isPast(deadline)
+      // Only a new assessment replaces the expiry timer, so the one on screen
+      // keeps counting down through a slow or failed refresh.
+      if (timerRef.current) clearTimeout(timerRef.current)
+      timerRef.current =
+        deadline === null || expired
+          ? null
+          : setTimeout(
+              () => setView((v) => (v.kind === 'ready' ? { ...v, expired: true } : v)),
+              deadline - Date.now(),
+            )
+      setView({ kind: 'ready', assessment, deadline, expired, refresh: { kind: 'idle' } })
+      recheckAt(
+        deadline === null
+          ? requestedAt + RECHECK_RETRY_MS
+          : Math.max(deadline - RECHECK_LEAD_MS, requestedAt + RECHECK_MIN_GAP_MS),
+      )
     } catch (err) {
-      if (ctrl.signal.aborted) return
-      const message = err instanceof AssessmentError ? err.message : 'request failed'
-      setView({ kind: 'error', message })
+      // An abort that is not our timeout means a newer request or an unmount took over.
+      if (ctrl.signal.aborted && !timedOut) return
+      const message = timedOut
+        ? `No response within ${REQUEST_TIMEOUT_MS / 1000} seconds.`
+        : err instanceof AssessmentError
+          ? `The response was rejected: ${err.message}.`
+          : 'The server could not be reached.'
+      setView((v) => (v.kind === 'ready' ? { ...v, refresh: { kind: 'failed', message } } : { kind: 'error', message }))
+      recheckAt(Date.now() + RECHECK_RETRY_MS)
     } finally {
       clearTimeout(timeout)
     }
@@ -43,173 +101,105 @@ export function App() {
 
   useEffect(() => {
     refresh()
+    // Timers do not run while a tab sleeps, so catch up on return: mark an
+    // assessment whose time has passed, and make the request that came due.
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return
-      setView((v) => {
-        if (v.kind !== 'ready' || v.expired) return v
-        const until = v.assessment.valid_until ? Date.parse(v.assessment.valid_until) : NaN
-        if (Number.isFinite(until) && until <= Date.now()) return { ...v, expired: true }
-        return v
-      })
+      setView((v) => (v.kind === 'ready' && !v.expired && isPast(v.deadline) ? { ...v, expired: true } : v))
+      if (recheckAtRef.current !== null && Date.now() >= recheckAtRef.current) refresh(true)
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => {
       document.removeEventListener('visibilitychange', onVisible)
       abortRef.current?.abort()
       if (timerRef.current) clearTimeout(timerRef.current)
+      if (recheckTimerRef.current) clearTimeout(recheckTimerRef.current)
     }
   }, [refresh])
 
+  const busy = view.kind === 'loading' || (view.kind === 'ready' && view.refresh.kind === 'pending')
+
   return (
     <main className="page">
-      <header>
-        <h1>Operations Control Room</h1>
-        <p className="subtitle">Chicago community areas · historical pickup baseline × live modeled precipitation</p>
+      <header className="topbar">
+        <span className="wordmark">Operations Control Room</span>
+        <span className="breadcrumb">
+          Chicago
+          {view.kind === 'ready' &&
+            ` · historical pickups + ${view.assessment.weather.simulated ? 'simulated weather' : 'live weather model'}`}
+        </span>
       </header>
-      {view.kind === 'ready' && view.assessment.history?.synthetic && (
-        <div className="banner" role="note">
-          <strong>Development baseline.</strong> {view.assessment.history.synthetic_notice ??
-            'Historical counts are synthetic; see README.'}
-        </div>
+
+      {view.kind === 'ready' && view.assessment.weather.simulated && (
+        <p className="banner" role="note">
+          <strong>Simulated weather.</strong> The weather adapter is pointed at {view.assessment.weather.source},
+          not Open-Meteo. Precipitation values on this page are not live readings.
+        </p>
       )}
-      <section className="conclusion" aria-live="polite">
-        {view.kind === 'loading' && <p>Loading current recommendation…</p>}
-        {view.kind === 'error' && (
-          <p className="error">The assessment could not be loaded ({view.message}). Try Refresh.</p>
-        )}
-        {view.kind === 'ready' && <Conclusion v={view} />}
-      </section>
-      <section className="controls">
-        <button type="button" onClick={refresh} disabled={view.kind === 'loading'}>
-          Refresh assessment
+
+      {view.kind === 'ready' && view.refresh.kind === 'failed' && (
+        <p className="banner" role="alert">
+          <strong>Refresh failed.</strong> {view.refresh.message} Still showing the{view.expired ? ' expired' : ''}{' '}
+          assessment made at {chicagoClock(view.assessment.assessed_at)}.
+        </p>
+      )}
+
+      {view.kind === 'loading' && <LoadingHero />}
+      {view.kind === 'error' && <ErrorHero message={view.message} />}
+      {view.kind === 'ready' && <Hero assessment={view.assessment} expired={view.expired} />}
+
+      <div className="toolbar">
+        <button
+          type="button"
+          className="btn btn-primary"
+          // aria-disabled rather than disabled: a disabled button drops keyboard focus.
+          onClick={busy ? undefined : () => refresh()}
+          aria-disabled={busy}
+        >
+          {busy && <span className="spinner" aria-hidden="true" />}
+          {busy ? 'Refreshing…' : 'Refresh'}
         </button>
-      </section>
-      {view.kind === 'ready' && <Evidence a={view.assessment} />}
+      </div>
+
+      {view.kind === 'ready' && (
+        <>
+          <div className={view.expired ? 'stale' : undefined}>
+            <CandidatesBoard a={view.assessment} />
+          </div>
+          <Provenance a={view.assessment} />
+          <Limits a={view.assessment} />
+        </>
+      )}
     </main>
   )
 }
 
-function Conclusion({ v }: { v: Extract<ViewState, { kind: 'ready' }> }) {
-  const a = v.assessment
-  if (v.expired) {
-    return <p className="expired">Assessment expired at {fmtTime(a.valid_until)}. Refresh to re-evaluate.</p>
-  }
-  if (a.status === 'action' && a.area) {
-    return (
-      <div>
-        <p className="action">
-          <strong>Put {a.area.name} (Community Area {a.area.area_id}) on watch for the next hour.</strong>
-        </p>
-        <p className="why">
-          {a.reason}. Consult your internal wait and cancellation signals before intervening — this app does not observe
-          live rider demand or driver supply.
-        </p>
-        <p className="meta">Valid until {fmtTime(a.valid_until)} · assessed at {fmtTime(a.assessed_at)}.</p>
-      </div>
-    )
-  }
-  if (a.status === 'no_action') {
-    return (
-      <div>
-        <p className="no-action">No action required.</p>
-        <p className="why">{a.reason} across the {a.candidates.length} evaluated area(s).</p>
-        <p className="meta">Valid until {fmtTime(a.valid_until)} · assessed at {fmtTime(a.assessed_at)}.</p>
-      </div>
-    )
-  }
+function LoadingHero() {
   return (
-    <div>
-      <p className="unavailable">Unavailable.</p>
-      <p className="why">{a.reason}</p>
-    </div>
+    <section className="hero" aria-busy="true">
+      <p className="status-row" data-status="unavailable">
+        <span className="status-dot" aria-hidden="true" />
+        <span>Loading</span>
+      </p>
+      <h1 className="hero-headline muted-headline">
+        Reading the historical baseline &amp; the live weather model…
+      </h1>
+    </section>
   )
 }
 
-function Evidence({ a }: { a: Assessment }) {
+function ErrorHero({ message }: { message: string }) {
   return (
-    <>
-      <section className="evidence">
-        <h2>Candidates (top {a.candidates.length} by historical pickups)</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Area</th>
-              <th>Mean pickups / matching day</th>
-              <th>Total (period)</th>
-              <th>Sample days</th>
-              <th>Modeled precip (mm/15m)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {a.candidates.map((c) => (
-              <CandidateRow key={c.area_id} c={c} />
-            ))}
-            {a.candidates.length === 0 && (
-              <tr>
-                <td colSpan={6}>No historical candidates for this hour.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </section>
-      <section className="evidence">
-        <h2>Data provenance</h2>
-        {a.history && (
-          <dl>
-            <dt>Historical dataset</dt>
-            <dd>
-              {a.history.dataset_id} · {a.history.period_start} to {a.history.period_end}
-              {a.history.synthetic && ' (synthetic)'}
-            </dd>
-            <dt>Rows loaded</dt>
-            <dd>{a.history.rows_loaded.toLocaleString()} buckets</dd>
-            <dt>Weather source</dt>
-            <dd>
-              {a.weather.source || 'none'}{' '}
-              {a.weather.fetched_at && <>· fetched {fmtTime(a.weather.fetched_at)}</>}
-            </dd>
-          </dl>
-        )}
-      </section>
-      <section className="evidence">
-        <h2>Limitations</h2>
-        <ul>
-          {a.limitations.map((l) => (
-            <li key={l}>{l}</li>
-          ))}
-        </ul>
-      </section>
-    </>
+    <section className="hero" role="alert">
+      <p className="status-row" data-status="unavailable">
+        <span className="status-dot" aria-hidden="true" />
+        <span>Error</span>
+      </p>
+      <h1 className="hero-headline">The assessment could not be loaded.</h1>
+      <p className="hero-why">
+        {message} Nothing is shown rather than something stale. The page tries again every minute; press Refresh to
+        try now.
+      </p>
+    </section>
   )
-}
-
-function CandidateRow({ c }: { c: Candidate }) {
-  const w = c.weather
-  const precip = w.state === 'valid' ? `${w.precipitation_mm?.toFixed(2)}` : `— (${w.reason ?? 'invalid'})`
-  return (
-    <tr>
-      <td>{c.rank}</td>
-      <td>
-        {c.name} <span className="muted">({c.area_id})</span>
-      </td>
-      <td>{c.mean_pickups_per_day.toFixed(1)}</td>
-      <td>{c.total_trips.toLocaleString()}</td>
-      <td>{c.sample_days}</td>
-      <td>{precip}</td>
-    </tr>
-  )
-}
-
-function fmtTime(iso: string | null): string {
-  if (!iso) return '—'
-  try {
-    return new Date(iso).toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZoneName: 'short',
-    })
-  } catch {
-    return iso
-  }
 }
