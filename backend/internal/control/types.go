@@ -7,7 +7,7 @@ import "time"
 // Seed is the committed historical extract loaded at startup.
 type Seed struct {
 	Areas   []Area       `json:"areas"`
-	Buckets []Bucket     `json:"buckets"`
+	Hours   []HourCounts `json:"hours"`
 	History ImportRecord `json:"history"`
 }
 
@@ -20,12 +20,12 @@ type Area struct {
 	CoordSource string  `json:"coord_source"`
 }
 
-// Bucket is one (area, day-of-week, hour-of-day) historical pickup count.
-type Bucket struct {
-	AreaID     int `json:"area_id"`
-	Dow        int `json:"dow"`
-	Hour       int `json:"hour"`
-	TotalTrips int `json:"total_trips"`
+// HourCounts holds the pickups of every community area for one clock hour of
+// one day. Trips[i] belongs to area i+1.
+type HourCounts struct {
+	Date  string `json:"date"`
+	Hour  int    `json:"hour"`
+	Trips []int  `json:"trips"`
 }
 
 // ImportRecord is the provenance of the committed seed.
@@ -40,21 +40,24 @@ type ImportRecord struct {
 	TripsExcludedInvalidArea int    `json:"trips_excluded_invalid_area"`
 }
 
-// Candidate is one historically eligible area plus the modeled weather at its point.
+// Candidate is one area's historical pickups for the current weekday-hour
+// plus the modeled weather at its point.
 type Candidate struct {
-	Rank              int             `json:"rank"`
-	AreaID            int             `json:"area_id"`
-	Name              string          `json:"name"`
-	Lat               float64         `json:"lat"`
-	Lon               float64         `json:"lon"`
-	TotalTrips        int             `json:"total_trips"`
-	SampleDays        int             `json:"sample_days"`
-	MeanPickupsPerDay float64         `json:"mean_pickups_per_day"`
-	Weather           WeatherEvidence `json:"weather"`
+	Rank       int             `json:"rank"`
+	AreaID     int             `json:"area_id"`
+	Name       string          `json:"name"`
+	Lat        float64         `json:"lat"`
+	Lon        float64         `json:"lon"`
+	SampleDays int             `json:"sample_days"`
+	MeanTrips  float64         `json:"mean_trips"`
+	MinTrips   int             `json:"min_trips"`
+	MaxTrips   int             `json:"max_trips"`
+	CityShare  float64         `json:"city_share"`
+	Weather    WeatherEvidence `json:"weather"`
 }
 
-// WeatherEvidence captures either a validated current precipitation reading
-// or an explicit invalidity reason. Precipitation is null when invalid.
+// WeatherEvidence is one area's reading. State is valid, invalid (with a
+// reason) or missing; precipitation is null unless the state is valid.
 type WeatherEvidence struct {
 	State           string     `json:"state"`
 	Reason          string     `json:"reason,omitempty"`
@@ -65,16 +68,21 @@ type WeatherEvidence struct {
 }
 
 // Assessment is the single API response: action, no_action or unavailable.
+// SlotStart is the start of the Chicago clock hour being evaluated. AssessedAt
+// is when the assessment was made; ValidUntil counts from it.
 type Assessment struct {
-	Status      string          `json:"status"`
-	Reason      string          `json:"reason"`
-	AssessedAt  time.Time       `json:"assessed_at"`
-	ValidUntil  *time.Time      `json:"valid_until"`
-	Area        *AreaRef        `json:"area"`
-	Candidates  []Candidate     `json:"candidates"`
-	History     *ImportRecord   `json:"history"`
-	Weather     WeatherSource   `json:"weather"`
-	Limitations []string        `json:"limitations"`
+	Status      string        `json:"status"`
+	ReasonCode  string        `json:"reason_code,omitempty"` // set only when unavailable
+	Reason      string        `json:"reason"`
+	SlotStart   time.Time     `json:"slot_start"`
+	AssessedAt  time.Time     `json:"assessed_at"`
+	ValidUntil  *time.Time    `json:"valid_until"`
+	TriggerMM   float64       `json:"trigger_mm"`
+	Area        *AreaRef      `json:"area"`
+	Candidates  []Candidate   `json:"candidates"`
+	History     *ImportRecord `json:"history"`
+	Weather     WeatherSource `json:"weather"`
+	Limitations []string      `json:"limitations"`
 }
 
 // AreaRef is the selected area shown with an action status.
@@ -83,9 +91,11 @@ type AreaRef struct {
 	Name   string `json:"name"`
 }
 
-// WeatherSource documents the upstream provider and fetch time.
+// WeatherSource documents the endpoint the readings came from. Simulated is
+// set whenever that endpoint is not the official Open-Meteo forecast API.
 type WeatherSource struct {
 	Source    string     `json:"source"`
+	Simulated bool       `json:"simulated"`
 	FetchedAt *time.Time `json:"fetched_at"`
 }
 
@@ -94,23 +104,33 @@ const (
 	StatusNoAction    = "no_action"
 	StatusUnavailable = "unavailable"
 
+	// Evidence states. A candidate starts as missing and stays so when the
+	// weather request fails; only a valid reading may be read as dry or wet.
 	WeatherValid   = "valid"
 	WeatherInvalid = "invalid"
+	WeatherMissing = "missing"
 
-	// PrecipitationTriggerMM is the modeled-precipitation threshold that puts
-	// an eligible area on watch. 0.2 mm/15 min is a conservative light-rain
-	// level consistent with WMO/NWS "light rain" bands; documented in README.
+	// Why an assessment is unavailable.
+	ReasonNoHistory          = "no_history"          // no pickups in the baseline for this weekday-hour
+	ReasonWeatherUnavailable = "weather_unavailable" // the weather source gave no usable reading
+	ReasonWeatherInvalid     = "weather_invalid"     // a needed reading failed validation
+
+	// PrecipitationTriggerMM is the modeled precipitation per 15-minute
+	// interval at or above which an area is put on watch, roughly light rain
+	// (0.8 mm/h). It is a heuristic, not a validated threshold.
 	PrecipitationTriggerMM = 0.2
 
-	// AssessmentValidity is how long any non-unavailable response may be used
-	// after it was assessed, before the client must refresh.
+	// AssessmentValidity is how long an action or no_action response may be
+	// used after it was assessed, before the client must refresh.
 	AssessmentValidity = 5 * time.Minute
 
-	// WeatherFreshness is the maximum age of a modeled reading we accept.
+	// WeatherFreshness is the maximum age of an accepted reading.
 	WeatherFreshness = 30 * time.Minute
 
-	// WeatherLead is the maximum future lead we accept for a modeled reading.
-	WeatherLead = 5 * time.Minute
+	// WeatherLead is how far in the future a reading may be stamped. Open-Meteo
+	// stamps `current` with the start of a 15-minute interval, which our clock
+	// may not have reached yet; one interval plus a minute covers that skew.
+	WeatherLead = 16 * time.Minute
 
 	// ExpectedIntervalSeconds is the Open-Meteo "current" bucket length.
 	ExpectedIntervalSeconds = 900

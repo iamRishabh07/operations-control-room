@@ -20,7 +20,15 @@ const (
 // WeatherClient fetches current modeled precipitation for a list of coordinates.
 type WeatherClient struct {
 	HTTP    *http.Client
-	BaseURL string // override for tests
+	BaseURL string // empty means Open-Meteo; tests and the demo simulator set it
+}
+
+// endpoint is the URL the readings come from: BaseURL when set, else Open-Meteo.
+func (w *WeatherClient) endpoint() string {
+	if w.BaseURL != "" {
+		return w.BaseURL
+	}
+	return openMeteoForecastURL
 }
 
 // Fetch returns one WeatherEvidence per input candidate, in the same order.
@@ -30,10 +38,7 @@ func (w *WeatherClient) Fetch(ctx context.Context, assessedAt time.Time, candida
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	base := w.BaseURL
-	if base == "" {
-		base = openMeteoForecastURL
-	}
+	base := w.endpoint()
 	lats := make([]string, len(candidates))
 	lons := make([]string, len(candidates))
 	for i, c := range candidates {
@@ -88,10 +93,11 @@ func parseWeather(body []byte, want int) ([]rawPoint, error) {
 	if len(trimmed) == 0 {
 		return nil, errors.New("empty weather body")
 	}
-	// Multi-location request returns a JSON array; single location returns an object.
+	// Open-Meteo answers a multi-location request with an array and a
+	// single location with a bare object.
 	if trimmed[0] == '[' {
 		var multi []rawPoint
-		if err := strictUnmarshal(body, &multi); err != nil {
+		if err := json.Unmarshal(body, &multi); err != nil {
 			return nil, fmt.Errorf("weather json (array): %w", err)
 		}
 		if len(multi) != want {
@@ -100,29 +106,13 @@ func parseWeather(body []byte, want int) ([]rawPoint, error) {
 		return multi, nil
 	}
 	var single rawPoint
-	if err := strictUnmarshal(body, &single); err != nil {
+	if err := json.Unmarshal(body, &single); err != nil {
 		return nil, fmt.Errorf("weather json (object): %w", err)
 	}
 	if want != 1 {
 		return nil, fmt.Errorf("weather returned 1 point, want %d", want)
 	}
 	return []rawPoint{single}, nil
-}
-
-func strictUnmarshal(body []byte, v any) error {
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		if errors.Is(err, io.EOF) {
-			return errors.New("truncated json")
-		}
-		// Allow unknown Open-Meteo top-level fields by retrying without strict mode.
-		return json.Unmarshal(body, v)
-	}
-	if dec.More() {
-		return errors.New("trailing content after json")
-	}
-	return nil
 }
 
 func classify(p rawPoint, assessedAt time.Time) WeatherEvidence {
@@ -139,7 +129,8 @@ func classify(p rawPoint, assessedAt time.Time) WeatherEvidence {
 	}
 	if units != ExpectedUnits {
 		ev.State = WeatherInvalid
-		ev.Reason = "unexpected units: " + units
+		// The unit string comes from the upstream response: quote and cap it.
+		ev.Reason = fmt.Sprintf("unexpected units: %.16q", units)
 		return ev
 	}
 	if *p.Current.Interval != ExpectedIntervalSeconds {
@@ -149,7 +140,7 @@ func classify(p rawPoint, assessedAt time.Time) WeatherEvidence {
 	}
 	if age > WeatherFreshness {
 		ev.State = WeatherInvalid
-		ev.Reason = fmt.Sprintf("reading older than %s", WeatherFreshness)
+		ev.Reason = fmt.Sprintf("reading older than %d minutes", int(WeatherFreshness.Minutes()))
 		return ev
 	}
 	if age < -WeatherLead {

@@ -6,15 +6,17 @@ CREATE TABLE IF NOT EXISTS areas (
   coord_source TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS pickup_baseline (
+-- One observation per community area, calendar day and clock hour (Chicago
+-- local time). The weekday is derived from service_date in the ranking query.
+CREATE TABLE IF NOT EXISTS pickup_hourly (
   area_id INTEGER NOT NULL REFERENCES areas(area_id),
-  dow INTEGER NOT NULL CHECK (dow BETWEEN 0 AND 6),
+  service_date TEXT NOT NULL CHECK (service_date IS date(service_date)),
   hour INTEGER NOT NULL CHECK (hour BETWEEN 0 AND 23),
-  total_trips INTEGER NOT NULL CHECK (typeof(total_trips) = 'integer' AND total_trips >= 0),
-  PRIMARY KEY (area_id, dow, hour)
+  trips INTEGER NOT NULL CHECK (typeof(trips) = 'integer' AND trips >= 0),
+  PRIMARY KEY (area_id, service_date, hour)
 );
 
-CREATE INDEX IF NOT EXISTS pickup_baseline_time ON pickup_baseline (dow, hour, area_id);
+CREATE INDEX IF NOT EXISTS pickup_hourly_hour ON pickup_hourly (hour);
 
 CREATE TABLE IF NOT EXISTS dataset_imports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

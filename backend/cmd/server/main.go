@@ -25,20 +25,21 @@ import (
 
 func main() {
 	var (
-		addr     = flag.String("addr", "127.0.0.1:8080", "listen address")
-		dbPath   = flag.String("db", "data/control.db", "SQLite file path")
-		seedPath = flag.String("seed", "data/seed.json", "committed seed JSON path")
-		staticDir = flag.String("static", "frontend/dist", "built frontend directory; empty disables static serving")
-		initOnly = flag.Bool("init-only", false, "load seed + initialize DB and exit; used by `make setup`")
+		addr       = flag.String("addr", "127.0.0.1:8080", "listen address")
+		dbPath     = flag.String("db", "data/control.db", "SQLite file path")
+		seedPath   = flag.String("seed", "data/seed.json", "committed seed JSON path")
+		staticDir  = flag.String("static", "frontend/dist", "built frontend directory; empty disables static serving")
+		initOnly   = flag.Bool("init-only", false, "load seed + initialize DB and exit; used by `make setup`")
+		weatherURL = flag.String("weather-url", "", "read weather from this endpoint instead of Open-Meteo (demo only; responses are labelled simulated and show this URL, so put no credentials in it)")
 	)
 	flag.Parse()
 
-	if err := run(*addr, *dbPath, *seedPath, *staticDir, *initOnly); err != nil {
+	if err := run(*addr, *dbPath, *seedPath, *staticDir, *weatherURL, *initOnly); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(addr, dbPath, seedPath, staticDir string, initOnly bool) error {
+func run(addr, dbPath, seedPath, staticDir, weatherURL string, initOnly bool) error {
 	loc, err := time.LoadLocation("America/Chicago")
 	if err != nil {
 		return fmt.Errorf("load timezone: %w", err)
@@ -63,7 +64,8 @@ func run(addr, dbPath, seedPath, staticDir string, initOnly bool) error {
 		DB:   db,
 		Seed: seed,
 		Weather: &control.WeatherClient{
-			HTTP: &http.Client{Timeout: 3 * time.Second},
+			HTTP:    &http.Client{Timeout: 3 * time.Second},
+			BaseURL: weatherURL,
 		},
 		Now: func() time.Time { return time.Now().UTC() },
 		Loc: loc,
@@ -77,7 +79,16 @@ func run(addr, dbPath, seedPath, staticDir string, initOnly bool) error {
 	if staticDir != "" {
 		if abs, err := filepath.Abs(staticDir); err == nil {
 			if st, err := os.Stat(abs); err == nil && st.IsDir() {
-				mux.Handle("/", http.FileServer(http.Dir(abs)))
+				files := http.FileServer(http.Dir(abs))
+				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+					// Asset names carry a content hash, but the page that names
+					// them does not: make the browser revalidate it, or a
+					// rebuilt frontend stays hidden behind a cached copy.
+					if r.URL.Path == "/" {
+						w.Header().Set("Cache-Control", "no-cache")
+					}
+					files.ServeHTTP(w, r)
+				})
 			} else {
 				log.Printf("static dir %s not present; API-only mode", abs)
 			}

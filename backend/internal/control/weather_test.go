@@ -98,6 +98,24 @@ func TestWeather_WrongUnitsInvalid(t *testing.T) {
 	}
 }
 
+func TestWeather_FutureBucketWithinLeadIsValid(t *testing.T) {
+	// Open-Meteo's `current` interval can start up to one interval ahead of
+	// our clock, so a reading 14 minutes in the future is accepted.
+	assessedAt := time.Unix(1_763_000_000, 0).UTC()
+	ts := assessedAt.Unix() + 14*60
+	body := `{"current":{"time":` + itoa64(ts) + `,"interval":900,"precipitation":0.1},"current_units":{"precipitation":"mm"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
+	defer srv.Close()
+	wc := mkClient(srv.URL)
+	evs, err := wc.Fetch(context.Background(), assessedAt, []Candidate{{AreaID: 1, Lat: 41.8, Lon: -87.7}})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if evs[0].State != WeatherValid {
+		t.Fatalf("want valid for +14m reading, got %+v", evs[0])
+	}
+}
+
 func TestWeather_CountMismatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[{"current":{"time":1,"interval":900,"precipitation":0},"current_units":{"precipitation":"mm"}}]`))

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -19,12 +20,19 @@ var schemaSQL string
 //go:embed ranking.sql
 var rankingSQL string
 
-// LoadSeed parses a committed seed JSON file.
+const areaCount = 77
+
+// LoadSeed reads and validates a committed seed JSON file.
 func LoadSeed(path string) (Seed, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Seed{}, fmt.Errorf("read seed: %w", err)
 	}
+	return ParseSeed(data)
+}
+
+// ParseSeed decodes and validates seed JSON.
+func ParseSeed(data []byte) (Seed, error) {
 	var seed Seed
 	if err := json.Unmarshal(data, &seed); err != nil {
 		return Seed{}, fmt.Errorf("decode seed: %w", err)
@@ -35,19 +43,21 @@ func LoadSeed(path string) (Seed, error) {
 	return seed, nil
 }
 
+// validateSeed rejects anything but a dense extract: 77 areas and exactly one
+// row of 77 counts for every hour of every day in a whole number of weeks.
 func validateSeed(s Seed) error {
-	if len(s.Areas) != 77 {
-		return fmt.Errorf("want 77 areas, got %d", len(s.Areas))
+	if len(s.Areas) != areaCount {
+		return fmt.Errorf("want %d areas, got %d", areaCount, len(s.Areas))
 	}
-	seen := map[int]bool{}
+	seenArea := map[int]bool{}
 	for _, a := range s.Areas {
-		if a.AreaID < 1 || a.AreaID > 77 {
+		if a.AreaID < 1 || a.AreaID > areaCount {
 			return fmt.Errorf("area_id %d out of range", a.AreaID)
 		}
-		if seen[a.AreaID] {
+		if seenArea[a.AreaID] {
 			return fmt.Errorf("duplicate area_id %d", a.AreaID)
 		}
-		seen[a.AreaID] = true
+		seenArea[a.AreaID] = true
 		if a.Name == "" {
 			return fmt.Errorf("area %d has empty name", a.AreaID)
 		}
@@ -55,28 +65,49 @@ func validateSeed(s Seed) error {
 			return fmt.Errorf("area %d coords out of Chicago bounds", a.AreaID)
 		}
 	}
-	const wantBuckets = 77 * 7 * 24
-	if len(s.Buckets) != wantBuckets {
-		return fmt.Errorf("want %d buckets, got %d", wantBuckets, len(s.Buckets))
+
+	start, errStart := time.Parse(time.DateOnly, s.History.PeriodStart)
+	end, errEnd := time.Parse(time.DateOnly, s.History.PeriodEnd)
+	if errStart != nil || errEnd != nil {
+		return fmt.Errorf("period %q..%q is not a pair of ISO dates", s.History.PeriodStart, s.History.PeriodEnd)
 	}
-	bucketSeen := map[[3]int]bool{}
+	days := int(end.Sub(start).Hours()/24) + 1
+	if days <= 0 || days%7 != 0 {
+		return fmt.Errorf("period must cover whole weeks, got %d days", days)
+	}
+	if len(s.Hours) != days*24 {
+		return fmt.Errorf("want %d hourly rows, got %d", days*24, len(s.Hours))
+	}
+	seenHour := map[string]bool{}
 	sum := 0
-	for _, b := range s.Buckets {
-		k := [3]int{b.AreaID, b.Dow, b.Hour}
-		if bucketSeen[k] {
-			return fmt.Errorf("duplicate bucket %v", k)
+	for _, h := range s.Hours {
+		day, err := time.Parse(time.DateOnly, h.Date)
+		if err != nil || day.Before(start) || day.After(end) {
+			return fmt.Errorf("hourly row date %q is outside the period", h.Date)
 		}
-		if b.AreaID < 1 || b.AreaID > 77 || b.Dow < 0 || b.Dow > 6 || b.Hour < 0 || b.Hour > 23 {
-			return fmt.Errorf("bucket out of range: %v", k)
+		if h.Hour < 0 || h.Hour > 23 {
+			return fmt.Errorf("hourly row %s has hour %d", h.Date, h.Hour)
 		}
-		if b.TotalTrips < 0 {
-			return fmt.Errorf("negative trips at %v", k)
+		key := fmt.Sprintf("%sT%02d", h.Date, h.Hour)
+		if seenHour[key] {
+			return fmt.Errorf("duplicate hourly row %s", key)
 		}
-		bucketSeen[k] = true
-		sum += b.TotalTrips
+		seenHour[key] = true
+		if len(h.Trips) != areaCount {
+			return fmt.Errorf("hourly row %s has %d counts, want %d", key, len(h.Trips), areaCount)
+		}
+		for i, trips := range h.Trips {
+			if trips < 0 {
+				return fmt.Errorf("negative trips for area %d at %s", i+1, key)
+			}
+			sum += trips
+		}
 	}
-	if s.History.TripsIncluded > 0 && sum != s.History.TripsIncluded {
-		return fmt.Errorf("sum %d != history.trips_included %d", sum, s.History.TripsIncluded)
+	if sum != s.History.TripsIncluded {
+		return fmt.Errorf("hourly counts sum to %d, history.trips_included is %d", sum, s.History.TripsIncluded)
+	}
+	if want := days * 24 * areaCount; s.History.RowsLoaded != want {
+		return fmt.Errorf("history.rows_loaded is %d, want %d", s.History.RowsLoaded, want)
 	}
 	return nil
 }
@@ -128,14 +159,16 @@ func initFresh(ctx context.Context, db *sql.DB, seed Seed) error {
 			return fmt.Errorf("insert area %d: %w", a.AreaID, err)
 		}
 	}
-	bucketStmt, err := tx.PrepareContext(ctx, `INSERT INTO pickup_baseline (area_id, dow, hour, total_trips) VALUES (?, ?, ?, ?)`)
+	hourStmt, err := tx.PrepareContext(ctx, `INSERT INTO pickup_hourly (area_id, service_date, hour, trips) VALUES (?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
-	defer bucketStmt.Close()
-	for _, b := range seed.Buckets {
-		if _, err := bucketStmt.ExecContext(ctx, b.AreaID, b.Dow, b.Hour, b.TotalTrips); err != nil {
-			return fmt.Errorf("insert bucket %d/%d/%d: %w", b.AreaID, b.Dow, b.Hour, err)
+	defer hourStmt.Close()
+	for _, h := range seed.Hours {
+		for i, trips := range h.Trips {
+			if _, err := hourStmt.ExecContext(ctx, i+1, h.Date, h.Hour, trips); err != nil {
+				return fmt.Errorf("insert %s hour %d area %d: %w", h.Date, h.Hour, i+1, err)
+			}
 		}
 	}
 	h := seed.History
@@ -155,18 +188,46 @@ func verifyProvenance(ctx context.Context, db *sql.DB, seed Seed) error {
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return errors.New("existing DB has schema but no import metadata; choose a new DB path or remove the file")
+			return errors.New("existing DB has schema but no import metadata; rerun `make setup` to rebuild it")
 		}
 		return fmt.Errorf("read import metadata: %w", err)
 	}
 	s := seed.History
-	if h.DatasetID != s.DatasetID || h.PeriodStart != s.PeriodStart || h.PeriodEnd != s.PeriodEnd || h.TripsIncluded != s.TripsIncluded || h.RowsLoaded != s.RowsLoaded {
-		return fmt.Errorf("existing DB provenance mismatches seed (dataset=%s/%s period=%s/%s); choose a new DB path or remove the file",
-			h.DatasetID, s.DatasetID, h.PeriodStart, s.PeriodStart)
+	var diffs []string
+	if h.DatasetID != s.DatasetID {
+		diffs = append(diffs, fmt.Sprintf("dataset_id: %q vs %q", h.DatasetID, s.DatasetID))
+	}
+	if h.PeriodStart != s.PeriodStart || h.PeriodEnd != s.PeriodEnd {
+		diffs = append(diffs, fmt.Sprintf("period: %s..%s vs %s..%s", h.PeriodStart, h.PeriodEnd, s.PeriodStart, s.PeriodEnd))
+	}
+	if h.TripsIncluded != s.TripsIncluded {
+		diffs = append(diffs, fmt.Sprintf("trips_included: %d vs %d", h.TripsIncluded, s.TripsIncluded))
+	}
+	if h.RowsLoaded != s.RowsLoaded {
+		diffs = append(diffs, fmt.Sprintf("rows_loaded: %d vs %d", h.RowsLoaded, s.RowsLoaded))
+	}
+	if len(diffs) > 0 {
+		return fmt.Errorf(
+			"existing DB was built from a different seed (%s); rerun `make setup` to rebuild it",
+			strings.Join(diffs, "; "),
+		)
+	}
+	// Matching metadata is not enough: the rows themselves must still add up.
+	var rows, trips int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(trips), 0) FROM pickup_hourly`).Scan(&rows, &trips); err != nil {
+		return fmt.Errorf("read pickup_hourly: %w; rerun `make setup` to rebuild it", err)
+	}
+	if rows != s.RowsLoaded || trips != s.TripsIncluded {
+		return fmt.Errorf(
+			"existing DB holds %d rows and %d trips, the seed has %d and %d; rerun `make setup` to rebuild it",
+			rows, trips, s.RowsLoaded, s.TripsIncluded,
+		)
 	}
 	return nil
 }
 
+// splitSQL splits on every semicolon, so schema.sql must keep them out of
+// literals and comments.
 func splitSQL(blob string) []string {
 	parts := strings.Split(blob, ";")
 	out := make([]string, 0, len(parts))
@@ -178,28 +239,20 @@ func splitSQL(blob string) []string {
 	return out
 }
 
-// RankCandidates returns up to 5 historically positive areas for (dow, hour),
-// ordered by total pickups desc then area_id asc.
-func RankCandidates(ctx context.Context, db *sql.DB, history ImportRecord, dow, hour int) ([]Candidate, error) {
-	rows, err := db.QueryContext(ctx, rankingSQL,
-		sql.Named("period_start", history.PeriodStart),
-		sql.Named("period_end", history.PeriodEnd),
-		sql.Named("dow", dow),
-		sql.Named("hour", hour),
-	)
+// RankCandidates returns up to five areas for a weekday (0 = Sunday) and hour,
+// ordered by mean historical pickups, then area_id.
+func RankCandidates(ctx context.Context, db *sql.DB, dow, hour int) ([]Candidate, error) {
+	rows, err := db.QueryContext(ctx, rankingSQL, sql.Named("dow", dow), sql.Named("hour", hour))
 	if err != nil {
 		return nil, fmt.Errorf("ranking query: %w", err)
 	}
 	defer rows.Close()
-	var out []Candidate
-	rank := 1
+	out := []Candidate{}
 	for rows.Next() {
-		var c Candidate
-		if err := rows.Scan(&c.AreaID, &c.Name, &c.Lat, &c.Lon, &c.TotalTrips, &c.SampleDays, &c.MeanPickupsPerDay); err != nil {
+		c := Candidate{Rank: len(out) + 1, Weather: WeatherEvidence{State: WeatherMissing}}
+		if err := rows.Scan(&c.AreaID, &c.Name, &c.Lat, &c.Lon, &c.SampleDays, &c.MeanTrips, &c.MinTrips, &c.MaxTrips, &c.CityShare); err != nil {
 			return nil, fmt.Errorf("scan candidate: %w", err)
 		}
-		c.Rank = rank
-		rank++
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
