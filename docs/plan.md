@@ -41,4 +41,4 @@ One page: the recommendation with its evidence and caveat, the five areas with h
 
 ## Not done
 
-Not committed, pushed or deployed yet. The Vercel build has not been run; the container image has. The action state was first seen on real weather on 12 November 2026 (0.20 mm modeled at the busiest areas); before that it had only been exercised with simulated weather.
+Deployed at https://operations-control-room.vercel.app from the container image. The action state was first seen on real weather on 12 November 2026 (0.20 mm modeled at the busiest areas); before that it had only been exercised with simulated weather.

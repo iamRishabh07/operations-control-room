@@ -28,11 +28,6 @@ func LoadSeed(path string) (Seed, error) {
 	if err != nil {
 		return Seed{}, fmt.Errorf("read seed: %w", err)
 	}
-	return ParseSeed(data)
-}
-
-// ParseSeed decodes and validates seed JSON.
-func ParseSeed(data []byte) (Seed, error) {
 	var seed Seed
 	if err := json.Unmarshal(data, &seed); err != nil {
 		return Seed{}, fmt.Errorf("decode seed: %w", err)

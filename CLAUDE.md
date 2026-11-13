@@ -94,6 +94,6 @@ Do not implement until the user approves the plan. Do not modify unrelated files
 - Live and simulated wording sits in four components and `handler.go`. When changing either, run `grep -rn simulated frontend/src backend/internal` and keep both sides in step.
 - Rank areas by mean pickups, not by a ratio. Ratios over small counts put areas with a handful of trips on top.
 - `make demo` points the weather adapter at `scripts/sim_weather.py`. Any weather source other than Open-Meteo is labelled simulated in the API and the UI; never present those readings as live.
-- `go.mod` is at the repo root (Vercel requires it). The service has two entry points that must stay thin: `backend/cmd/server` (local, Docker) and `backend/serverless` (called by `api/recommendation.go` on Vercel). Put behaviour in `backend/internal/control`, never in an entry point.
+- Production is the `Dockerfile` image on Vercel's container runtime (`vercel.json`, project env `PORT=8080`); every push to `main` redeploys. `backend/cmd/server` is the only entry point: keep it thin and put behaviour in `backend/internal/control`.
 - The page re-checks by itself (`RECHECK_*` constants in `frontend/src/App.tsx`). Automatic requests pass `background = true` and must not change what is on screen until they finish.
 - When testing page timing with a fake clock, let in-flight requests finish before advancing it; otherwise a real 200 ms response looks like a 5 s timeout.

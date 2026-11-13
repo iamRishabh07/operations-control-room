@@ -15,7 +15,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY backend/ backend/
-COPY data/seed.go data/seed.json data/
+COPY data/seed.json data/
 RUN CGO_ENABLED=0 go build -o /out/server ./backend/cmd/server
 # Build the database here, as `make setup` does, so a small host does not have
 # to load 51,744 rows on every start.

@@ -1,7 +1,7 @@
 .PHONY: setup run demo acquire test test-acquire lint build clean
 
 # Listed explicitly: a bare ./... from the repo root also picks up Go files inside node_modules.
-GO_PKGS = ./api/... ./backend/... ./data/...
+GO_PKGS = ./backend/...
 
 # ARGS passes extra server flags, e.g. make run ARGS="-weather-url http://127.0.0.1:9/"
 SERVE = cd backend && go run ./cmd/server -seed ../data/seed.json -db ../data/control.db -static ../frontend/dist $(ARGS)

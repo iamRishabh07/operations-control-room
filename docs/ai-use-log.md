@@ -134,6 +134,13 @@ How it was validated (actual results):
 
 Not verified: **the Vercel build.** It could not be run without the account. It relies on three things Vercel's documentation does not state for its beta Go runtime: Go functions beside a Vite site in one project, imports from elsewhere in the module, and a writable temp directory. Also not verified: Go 1.25 on Vercel; any browser other than Chromium; screen-reader output.
 
+## Deployment — 2026-11-13
+Tool: Claude Code. The user imported the repository on Vercel. The dashboard detected the `Dockerfile` and offered a container service; the AI's Go-function setup would not have been built at all once services were configured (the build log said so). The AI read Vercel's documentation on services and the container runtime, replaced `vercel.json` with a single container service, and asked the user to set `PORT=8080`, because Vercel routes to port 80 unless told otherwise. The first deployment succeeded in about two minutes.
+
+Checked from outside (actual results): the page returns 200 with `Cache-Control: no-cache`; `/api/recommendation` returns `no_action` in 0.5 s with a live, non-simulated Open-Meteo reading and `rows_loaded` 51,744; an unknown path returns 404 and a POST returns 405, as locally.
+
+Then removed the unused function route (`api/`, `backend/serverless/`, `data/seed.go`) and pointed the docs at the live URL. Not verified: behaviour after the container sleeps (first request after five idle minutes).
+
 ## Implementation start — 2026-11-12
 Tool: Codex, using karpathy-engineering and project SQL/Go/UI skills. User requested implementation of the approved plan.
 Historical discussion record (recorded now, not backdated): user rejected 28-day history, one-area weather, and strict all-candidate validity; accepted full-year aggregates, top-five evaluation and rank-prefix. The denominator claim was corrected: common denominator does not change ordering. No historical tests are claimed.

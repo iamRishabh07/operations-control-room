@@ -8,6 +8,8 @@ The rule is deliberately small. Take the five community areas with the most hist
 
 The app does not see live demand, drivers, wait times or cancellations, and says so on the page.
 
+**Live:** https://operations-control-room.vercel.app
+
 ![Hold state with live weather](docs/evidence/screenshots/hold-live-weather.png)
 
 ## Run it
@@ -153,8 +155,7 @@ frontend/  React + TypeScript + Vite, plain CSS
    │  GET /api/recommendation
    ▼
 backend/   Go, net/http + database/sql + modernc.org/sqlite (pure Go)
-   ├── cmd/server/main.go                 local entry: flags, startup, static files
-   ├── serverless/handler.go              hosted entry: same service, built once per instance
+   ├── cmd/server/main.go                 flags, startup, static files
    └── internal/control/
        ├── schema.sql, ranking.sql        embedded SQL
        ├── store.go                       seed validation, DB init, ranking query
@@ -162,7 +163,6 @@ backend/   Go, net/http + database/sql + modernc.org/sqlite (pure Go)
        ├── recommendation.go              Decide(): the rule above, no I/O
        └── handler.go                     one request, one assessment
 
-api/recommendation.go   the file Vercel turns into a function; calls backend/serverless
 data/seed.json          committed historical extract, loaded into SQLite
 scripts/acquire.py      rebuilds the seed from the Chicago data portal
 go.mod                  one Go module for the repository
@@ -264,10 +264,11 @@ make test
 
 ## Deploying
 
-Two ways, both from the repository as committed.
+Live at **https://operations-control-room.vercel.app**, served by Vercel from the `Dockerfile`.
 
-- **Vercel.** Import the repository; `vercel.json` carries the settings. The frontend is built as a static site and `api/recommendation.go` becomes a Go function that serves the same `control.Service`. The function has no disk of its own, so the seed is compiled in and SQLite is rebuilt from it in the temp directory when an instance starts.
-- **Any container host** (Render, Fly, Cloud Run). The `Dockerfile` runs the same server as `make run`, listens on `$PORT`, and has the database built into the image. Checked locally: ready in under a second with 0.1 CPU and 512 MB.
+The `Dockerfile` runs the same server as `make run`, listens on `$PORT`, and has the database built into the image. `vercel.json` declares that image as a single container service and routes all traffic to it; the project sets `PORT=8080`. Every push to `main` redeploys. Any other container host (Render, Fly, Cloud Run) can run the same image unchanged.
+
+Vercel's container runtime is in beta. Instances sleep after five minutes without traffic, so the first request after a pause is slower.
 
 ## Assumptions, trade-offs and limits
 
@@ -334,7 +335,6 @@ Most of the code in this repository was written by AI tools under my direction. 
 | Let the page crash or mislabel on two malformed responses | Reading the code, then feeding those responses in a browser |
 | Verified a change against a stale cached build | The loaded script name did not match the build; the server now tells the browser to revalidate the page |
 | Assumed frontend tests needed a new dependency | Running the parser under plain Node |
-| Cached a failed start in the hosted entry point for the life of the instance | A reviewer agent; fixed with a test that fails once, then succeeds |
 
 The general risk: the tools report "done" confidently. Several of the errors above were in code that had been described as finished and verified. The rule I ended up with is that nothing counts as done until it has been checked against the running app or the live source.
 
