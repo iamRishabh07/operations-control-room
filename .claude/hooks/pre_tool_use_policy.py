@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Conservative demo hook: block a few exact high-risk shell command patterns.
+"""PreToolUse hook that denies a few high-risk shell command patterns.
 
-Claude Code passes hook input as JSON via stdin. Convenience guard, not a
-security boundary; does not handle every possible shell indirection. Keep
-Claude Code permission prompts on and review this script before trusting it.
+Claude Code passes the hook input as JSON on stdin. This is a convenience
+guard, not a security boundary: it does not see through every form of shell
+indirection, so keep permission prompts on.
 """
 import json
 import re

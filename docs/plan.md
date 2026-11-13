@@ -1,51 +1,44 @@
-# Implementation plan v5 — implemented 2026-11-13
+# Plan and status
 
-Status: implemented and runnable end-to-end. Historical baseline shipped as a labelled synthetic development seed because the Chicago data portal's grouped-query path was unresponsive during submission preparation (see `docs/decisions.md`). All code paths a reviewer would evaluate are real.
+Status on 2026-11-13: implemented and running on real data. Earlier versions of this plan (a full-year baseline, then a synthetic seed while the data portal was failing) are recorded in `docs/decisions.md`.
 
 ## Product
 
-One recommendation: put the highest-ranked eligible Chicago community area on watch for one hour when current modeled precipitation meets a documented threshold. History selects where to look, not live demand. Operator is assumed to have internal wait/cancellation signals. No shortage, causality, supply or validated-benefit claim.
+One recommendation: put the busiest Chicago community area with modeled precipitation at the trigger on watch for one hour, or say that no watch is needed. History says where pickups concentrate for this weekday and hour; the live weather model says whether anything is happening there now. The app makes no claim about live demand, supply, shortage or causality.
 
 ## Data and SQL
 
-- Source: synthetic development baseline (`data/seed.json`, `history.synthetic=true`) derived from documented Chicago TNP characteristics (weekday commute peaks, weekend nightlife shift, Loop/Near-North/O'Hare dominance). Real community-area list and coordinates from Chicago boundaries endpoint `igwz-8jzy`. The real acquisition script (`scripts/acquire.py`) is preserved for when the portal recovers.
-- Schema: three SQLite tables with `CHECK` constraints — `areas`, `pickup_baseline`, `dataset_imports`. Foreign keys enforced per connection, WAL journal, append-only import log.
-- Ranking SQL: recursive CTE counts matching calendar days for `:dow` in the reference period; joins baseline + areas; filters `total_trips > 0`; orders `total_trips DESC, area_id ASC`; `LIMIT 5`. The denominator does not change ordering at fixed `(dow, hour)` but keeps the displayed mean interpretable and co-locates filter + tie-break with the query itself.
+- Source: Chicago TNP trips archive `m6dm-c72p`, 12 September to 9 October 2022 (28 days, no US federal holiday), acquired one hour at a time with half-open windows and committed as `data/seed.json`.
+- Three SQLite tables: `areas`, `pickup_hourly` (one row per area, day and hour), `dataset_imports`.
+- The ranking query aggregates the matching days per area (mean, range, sample size), computes each area's share of the city with a window function, and returns the top five by mean pickups.
 
-## Weather + decision
+## Weather and decision
 
-- Open-Meteo forecast endpoint, one call per assessment with up to 5 comma-separated coordinates, 3 s client timeout, 1 MiB body cap, strict JSON (unknown-field tolerant at top level).
-- Per-candidate validity: valid `time`/`interval`/`precipitation`, units `mm`, interval 900 s, age within `-5m..+30m`, value finite + nonnegative.
-- Decide: walk candidates in rank order; invalid predecessor → unavailable; first valid wet (≥ 0.2 mm) → action; otherwise no_action. `valid_until = min(assessedAt + 5m, next local hour, oldest evidence freshness in the prefix)`.
-- Assessment anchor is the **start of the current Chicago hour**; the historical bucket and the displayed time always agree. Timezone comes from `time.LoadLocation("America/Chicago")` with `time/tzdata` embedded.
+- One Open-Meteo request per assessment for up to five points; 3 s timeout, 1 MiB cap, no retries.
+- A reading counts only if it is in mm, covers 900 s, is not negative and is at most 30 minutes old.
+- Walk the five in rank order: an invalid reading above the winner makes the result unavailable; the first reading at or above 0.2 mm wins; all dry means hold.
+- The result expires after 5 minutes, at the end of the Chicago clock hour, or when a reading it used turns 30 minutes old.
 
-## API + UI
+## Interface
 
-- `GET /api/recommendation` → one typed assessment JSON (`action` / `no_action` / `unavailable`), `valid_until` null exactly for `unavailable`, candidates ≤ 5, each with normalised weather evidence.
-- Internal DB failure → safe `503` with `{ error, message }`. Weather upstream failure → normal `200` with `unavailable` + reason.
-- React/TS/Vite UI: one conclusion, a "development baseline" banner driven by `history.synthetic`, evidence table for candidates, data-provenance + limitations sections. Manual refresh only, bounded by `AbortController` + 5 s timeout. Local timer honours `valid_until` and recomputes expiry on `visibilitychange`.
+One page: the recommendation with its evidence and caveat, the five areas with historical and live columns labelled as such, provenance, known limits. Manual refresh only. Every time is shown in Chicago time. A simulated weather source is labelled wherever a reading appears.
 
-## Tests
+## Milestones
 
-Three focused test groups under `backend/internal/control/`:
+| | Milestone | Status |
+|---|---|---|
+| 1 | Real historical extract, reconciled against the source | done |
+| 2 | Schema, ranking query, Go API | done |
+| 3 | Live weather, decision rule, failure handling | done |
+| 4 | Interface, expiry, error states, phone width | done |
+| 5 | Tests, screenshots, README, decision and AI-use records | done |
+| 6 | Explicit states: fail closed on missing evidence, reason codes, refresh in place, server-relative expiry | done |
+| 7 | Automatic re-check, frontend parser tests, hosted entry point, Dockerfile, AI-use section | done; deployment itself pending |
 
-1. `store_test.go` — real SQLite + real ranking: basic order, tie-break, wrong-hour exclusion, all-zero → empty, negative-trips rejection.
-2. `recommendation_test.go` — pure `Decide`, fixed clocks: wet first / dry-wet / all-dry / invalid predecessor / no candidates / upstream failure.
-3. `weather_test.go` — `httptest.Server`: multi-location array, single-location object, 500, stale, wrong units, count mismatch.
+## Checks
 
-Plus `scripts/test_acquire.py` acquisition-level checks (bounded fetch, coordinate traversal, integer validation).
+`make test` (Python acquisition tests, Go tests, vet, frontend lint, type-check and parser tests) and `npm run build`. A clean start is `make setup && make run`; setup always rebuilds the local database. `make demo` shows the action state with simulated weather, and `make run ARGS="-weather-url http://127.0.0.1:9/"` the unavailable state.
 
-## Delivery
+## Not done
 
-- `make setup` installs deps, builds frontend, ensures seed, initialises SQLite.
-- `make run` serves API + built frontend at `127.0.0.1:8080`.
-- `make test` runs Go tests + vet + frontend lint.
-- Clean checkout → `make setup && make run` rehearsed before submission.
-
-## Milestones (status)
-
-1. Source feasibility — **BLOCKED** on real source; pivoted to labelled synthetic baseline. Real `make acquire` preserved.
-2. Connected slice — **done**: SQL ranking + HTTP serving.
-3. Live decisions — **done**: Open-Meteo integration + rank-prefix tests.
-4. UI — **done**: React/TS strict, expiry handling, mobile-friendly table.
-5. Submission — **done**: README, decisions, ai-use-log reconciled; tests pass.
+Not committed, pushed or deployed yet. The Vercel build has not been run; the container image has. The action state was first seen on real weather on 12 November 2026 (0.20 mm modeled at the busiest areas); before that it had only been exercised with simulated weather.

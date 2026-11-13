@@ -36,3 +36,31 @@ The exercise says a polished solution could take 12-20 hours but asks the candid
 - Explain product decision, architecture, Go, data model and SQL.
 - Discuss trade-offs and use of AI.
 - Work through a small code change, extension or debugging task, using normal development tools including AI.
+
+## Where each requirement is met
+
+Paths are from the repository root. "README" means a section of `README.md`.
+
+| Requirement | Where |
+|---|---|
+| Backend in Go | `backend/` (standard library `net/http`); `go.mod` |
+| Relational database, 2–3 tables | SQLite, three tables: `backend/internal/control/schema.sql` |
+| Schema or migrations included | `schema.sql`, applied by `make setup`; README "Database and SQL" |
+| Aggregation, comparison or ranking in SQL | `backend/internal/control/ranking.sql`: `GROUP BY` aggregation, window share, ordered top five; README "Database and SQL" |
+| Public mobility dataset | Chicago TNP trips, dataset `m6dm-c72p`: `data/seed.json`, `scripts/acquire.py`; README "Data" |
+| One live external API | Open-Meteo: `backend/internal/control/weather.go` |
+| Frontend connected to the Go API | React + TypeScript: `frontend/src/` |
+| Two or three focused tests | README "Tests" names the three to read first; `make test` runs all |
+| One current recommendation only | `frontend/src/components/Hero.tsx`; README "How the recommendation is made" |
+| No intervention: explain why, show evidence | The "Hold" state: `Hero.tsx`, `CandidatesBoard.tsx`; screenshot `docs/evidence/screenshots/hold-live-weather.png` |
+| What could make it wrong, in the product | The caveat under each recommendation, the "Known limits" list, the unavailable and expired states; README "States" |
+| Understandable and actionable for an operator | Headline names the area and the action; the caveat says what to check before intervening |
+| README with setup and run | README "Run it" (two commands, or Docker) |
+| Schema, dependencies, configuration examples | `schema.sql`, `go.mod`, `frontend/package.json`, `vercel.json`, `Dockerfile`; README "Configuration" |
+| Screenshots or demo | `docs/evidence/screenshots/`; README |
+| Architecture overview | README "Architecture" |
+| Database design and SQL explained | README "Database and SQL" |
+| Assumptions, trade-offs, limitations | README "Assumptions, trade-offs and limits"; `docs/decisions.md` |
+| AI-use disclosure: tools, accepted, rejected, validation, wrong assumptions, hardest parts | README "AI use", one heading per question; `docs/ai-use-log.md` |
+| Runs locally with one or two commands | `make setup`, `make run` |
+| Deployment (optional) | README "Deploying": `vercel.json` and `Dockerfile` |

@@ -4,7 +4,7 @@
 - Read `docs/assignment-brief.md` and, when present, `docs/assignment.pdf`.
 - Uber final-round full-stack take-home. Scope ~8–10 hours of implementation, not a production platform.
 - `docs/assignment-brief.md` is a summary; the source PDF is authoritative if any conflict arises.
-- Reference playbook for this setup: `docs/references/The Claude Code Setup Playbook.pdf`.
+- Reference playbook for this setup: `docs/references/The Claude Code Setup Playbook.pdf` (local only, not in the repository; skip it when absent).
 
 ## Required product behavior
 - Show exactly ONE current operational recommendation; if no intervention is justified, show a useful no-action conclusion with supporting evidence.
@@ -21,6 +21,7 @@
 - One or two documented local run commands; keep setup simple. No default auth, Kafka, Kubernetes, ML or excess infra.
 
 ## Operating method
+The first two steps apply to new features and architecture changes. For a small change or a bug fix: read the code, make the change, run `make test`.
 - First: produce a requirement-to-test matrix and a small architectural options table. STOP before implementation.
 - Second: write `docs/plan.md` with milestones, source-acquisition limits, SQL ranking and no-action scenario. STOP for human approval.
 - On approval: implement one vertical slice at a time, with an executable verification command after each slice.
@@ -29,8 +30,9 @@
 - Keep `docs/decisions.md` and `README.md` accurate; reconcile with the actual implementation.
 
 ## Build checks
-- Backend: `go test ./...`; `go vet ./...`; `gofmt -w` only on files you change.
-- Frontend: `npm run lint`, `npm run build`, and any tests defined in `package.json`.
+- Backend: from the repo root, `go test ./api/... ./backend/... ./data/...` and `go vet` on the same; `gofmt -w` only on files you change. Never `./...` from the root: it also matches a Go package inside `frontend/node_modules`.
+- Frontend: `npm run lint`, `npm run typecheck`, `npm test` (Node's built-in runner, Node 22.18+, no test library), `npm run build`.
+- All of the above except the build: `make test`.
 - Database: migrate from empty local DB; verify representative SQL with fixtures and `EXPLAIN QUERY PLAN` on SQLite.
 - UI: inspect one recommendation state, no-action state, loading, external API error, and a small viewport.
 
@@ -49,9 +51,9 @@ For nontrivial code changes:
 Trivial changes stay lightweight.
 
 ## Orchestration protocol
-The main Claude Code session is the project orchestrator. Before nontrivial implementation:
+The main Claude Code session is the project orchestrator. This protocol is for new features and architecture changes, not for a small change or a bug fix. Before nontrivial implementation:
 1. Read `docs/assignment.pdf` as the authoritative brief (and `docs/assignment-brief.md`).
-2. Read `docs/references/The Claude Code Setup Playbook.pdf`.
+2. Read `docs/references/The Claude Code Setup Playbook.pdf` if it is present (local only).
 3. Read `docs/decisions.md` and `docs/plan.md`.
 4. Confirm the referenced subagents and skills exist under `.claude/agents/` and `.claude/skills/`.
 5. Identify assumptions, risks and acceptance criteria.
@@ -78,10 +80,20 @@ Do not implement until the user approves the plan. Do not modify unrelated files
 ## Workflow conventions
 - Use plan mode (`Shift+Tab`) for exploration before edits.
 - Prefer the `code-review-graph` MCP tools before Grep/Glob/Read (see `~/CLAUDE.md`).
-- Run `/verify` before claiming a slice complete.
+- Run `make test` and `cd frontend && npm run build` before claiming a slice complete.
 - Conventional commits; one logical change per commit.
 
 ## Gotchas
-- Acquisition budget: 60 s / 10 MB per attempt. Never silently relax.
-- Failed acquisitions must leave no `data/seed.json` or `data/manifest.json`.
-- `make setup` / `make run` are deliberately unimplemented until the source-feasibility gate passes.
+- `data/seed.json` is committed real data. `make acquire` rebuilds it with one small query per (date, hour): 30 s per request, 4 tries, 8 workers, resumable cache under `data/raw/` keyed by the query text. It publishes only a complete, reconciled extract and exits 1 otherwise. This replaced the earlier 60 s / 10 MB single-query budget, which the portal could not meet (see `docs/decisions.md`).
+- Hourly windows are half-open (`>= start AND < end`). An inclusive `between` double-counts every trip stamped HH:00, because the publisher rounds to 15 minutes.
+- After the seed changes, rerun `make setup`: it always rebuilds `data/control.db`. Startup refuses a DB that does not match the seed.
+- `make run` serves the built `frontend/dist`. After a `.tsx` change run `npm run build`, or use `npm run dev` (port 5173, `/api` proxied to 8080).
+- Only a `valid` weather reading may be read as wet or dry. `Decide` returns unavailable for `invalid` and `missing`; keep it that way.
+- State sets are defined once per side. Backend: status, reason-code and evidence-state constants in `backend/internal/control/types.go`. Frontend: the `Assessment` union in `frontend/src/api.ts`, whose parser enforces what each status guarantees, and `ViewState` in `frontend/src/App.tsx` for the page.
+- Adding a status touches, in order: the constant, `Decide`, the `Assessment` union and `parseAssessment`, `LABELS` and `explain` in `Hero.tsx` (type-checking fails until both are done), a `[data-status]` colour in `styles.css`, a case in `frontend/test/api.test.mjs`, and the States table in `README.md`. A new `reason_code` needs only the constant, `Decide` and the README table.
+- Live and simulated wording sits in four components and `handler.go`. When changing either, run `grep -rn simulated frontend/src backend/internal` and keep both sides in step.
+- Rank areas by mean pickups, not by a ratio. Ratios over small counts put areas with a handful of trips on top.
+- `make demo` points the weather adapter at `scripts/sim_weather.py`. Any weather source other than Open-Meteo is labelled simulated in the API and the UI; never present those readings as live.
+- `go.mod` is at the repo root (Vercel requires it). The service has two entry points that must stay thin: `backend/cmd/server` (local, Docker) and `backend/serverless` (called by `api/recommendation.go` on Vercel). Put behaviour in `backend/internal/control`, never in an entry point.
+- The page re-checks by itself (`RECHECK_*` constants in `frontend/src/App.tsx`). Automatic requests pass `background = true` and must not change what is on screen until they finish.
+- When testing page timing with a fake clock, let in-flight requests finish before advancing it; otherwise a real 200 ms response looks like a 5 s timeout.
