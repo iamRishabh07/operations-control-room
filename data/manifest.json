@@ -1,12 +1,13 @@
 {
-  "dataset_id": "dev-baseline-v1",
-  "period_end": "2022-12-31",
-  "period_start": "2022-01-01",
-  "query_text": "synthetic weekday/hour profile; hash=28589e2cd5528fc5",
-  "retrieved_at": "1970-01-01T00:00:00+00:00",
-  "rows_loaded": 12936,
-  "synthetic": true,
-  "synthetic_notice": "Deterministic development baseline. Chicago TNP portal grouped-query path was unresponsive at submission preparation; see docs/decisions.md. Replace by running `make acquire` once the portal recovers.",
-  "trips_excluded_invalid_area": 0,
-  "trips_included": 43613853
+  "dataset_id": "m6dm-c72p",
+  "period_start": "2022-09-12",
+  "period_end": "2022-10-09",
+  "retrieved_at": "2026-11-12T21:50:09+00:00",
+  "query_text": "SELECT pickup_community_area AS area_id, count(*) AS trips WHERE trip_start_timestamp >= '{start}' AND trip_start_timestamp < '{end}' GROUP BY pickup_community_area LIMIT 200",
+  "rows_loaded": 51744,
+  "trips_included": 5068366,
+  "trips_excluded_invalid_area": 496856,
+  "source_endpoint": "https://data.cityofchicago.org/resource/m6dm-c72p.json",
+  "windows": 672,
+  "reconciled_pairs": 3
 }

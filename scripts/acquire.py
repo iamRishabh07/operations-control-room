@@ -1,23 +1,75 @@
 #!/usr/bin/env python3
-"""Bounded, explicit acquisition of the assignment-linked 2022 archived aggregates."""
-import argparse
+"""Acquire the historical pickup baseline from the Chicago TNP trips archive.
+
+One small SoQL aggregation per (date, hour) against dataset m6dm-c72p, because
+the portal times out on wider grouped queries. Windows are half-open
+[HH:00, HH+1:00): the publisher rounds timestamps to 15 minutes, so an
+inclusive `between` would count every HH:00 trip in two hours.
+
+Responses are cached under data/raw/, in a folder named after the query text,
+so a rerun resumes where the last one stopped and a changed query never reuses
+old answers. Nothing is published until every window is present and a sample
+of adjacent hours reconciles against an independent live count.
+"""
+from __future__ import annotations
+
 import datetime as dt
+import hashlib
 import json
 import math
-from pathlib import Path
 import subprocess
+import sys
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = "https://data.cityofchicago.org/resource/m6dm-c72p.json"
-BOUNDARIES = "https://data.cityofchicago.org/resource/jcxq-k9xf.json"
-PERIOD = "trip_start_timestamp >= '2022-01-01T00:00:00' AND trip_start_timestamp < '2023-01-01T00:00:00'"
-VALID = "pickup_community_area between 1 and 77"
-SELECT = "pickup_community_area as area_id,date_extract_dow(trip_start_timestamp) as dow,date_extract_hh(trip_start_timestamp) as hour,count(*) as trips"
-GROUP = "pickup_community_area,date_extract_dow(trip_start_timestamp),date_extract_hh(trip_start_timestamp)"
+SEED = ROOT / "data" / "seed.json"
+MANIFEST = ROOT / "data" / "manifest.json"
 
-def integer(value):
+DATASET_ID = "m6dm-c72p"
+BASE = f"https://data.cityofchicago.org/resource/{DATASET_ID}.json"
+BOUNDARIES = "https://data.cityofchicago.org/resource/igwz-8jzy.json"
+
+# Four consecutive weeks with no US federal holiday (Labor Day is 5 Sep,
+# Columbus Day 10 Oct). The Chicago Marathon falls on the last Sunday.
+PERIOD_START = dt.date(2022, 9, 12)  # a Monday
+WEEKS = 4
+
+HOUR_QUERY = (
+    "SELECT pickup_community_area AS area_id, count(*) AS trips "
+    "WHERE trip_start_timestamp >= '{start}' AND trip_start_timestamp < '{end}' "
+    "GROUP BY pickup_community_area LIMIT 200"
+)
+COUNT_QUERY = (
+    "SELECT count(*) AS trips "
+    "WHERE trip_start_timestamp >= '{start}' AND trip_start_timestamp < '{end}'"
+)
+
+# A cached answer is only valid for the query that produced it.
+CACHE = ROOT / "data" / "raw" / ("tnp-hourly-" + hashlib.sha256(HOUR_QUERY.encode()).hexdigest()[:8])
+
+REQUEST_TIMEOUT = 30  # seconds per HTTP request
+REQUEST_TRIES = 4  # the portal is intermittently slow
+WORKERS = 8
+MAX_FAILED = 24  # stop early when the portal is clearly down
+# Window indexes whose pair (i, i+1) is checked against one live two-hour
+# count: a morning pair, a pair across midnight, and the final pair.
+RECONCILE_PAIRS = (8, 23, -2)
+
+NAME_FIXES = {"Ohare": "O'Hare", "Mckinley Park": "McKinley Park"}
+
+
+class SourceUnavailable(RuntimeError):
+    """The portal did not return usable data within the retry budget."""
+
+
+def integer(value) -> int:
+    """Parse a canonical non-negative integer; the portal sends counts as strings.
+
+    Values above 2**53 - 1 are rejected.
+    """
     if not isinstance(value, (str, int)) or isinstance(value, bool):
         raise ValueError("noninteger count/code")
     result = int(value)
@@ -25,97 +77,225 @@ def integer(value):
         raise ValueError("invalid integer")
     return result
 
-class Fetch:
-    def __init__(self):
-        self.start = time.monotonic()
-        self.size = 0
-        self.queries = []
-    def __call__(self, url, params=None):
-        if params:
-            url += "?" + urllib.parse.urlencode(params)
-        remaining = 60 - (time.monotonic() - self.start)
-        if remaining <= 0:
-            raise RuntimeError("60-second acquisition budget exhausted")
-        self.queries.append(url)
-        print("Fetching", url, flush=True)
-        result = subprocess.run(["curl", "--fail-with-body", "--silent", "--show-error", "--max-time", str(remaining), "--max-filesize", str(10_000_000-self.size), url], capture_output=True, timeout=remaining+1)
-        if result.returncode:
-            raise RuntimeError(result.stderr.decode().strip() + "\n" + result.stdout[:1000].decode(errors="replace"))
-        self.size += len(result.stdout)
-        if self.size > 10_000_000:
-            raise RuntimeError("10 MB acquisition budget exceeded")
-        return json.loads(result.stdout)
 
 def coordinates(value):
-    if isinstance(value, list) and len(value) >= 2 and all(isinstance(x, (float,int)) for x in value[:2]):
+    """Yield every [lon, lat] pair in a GeoJSON coordinate tree."""
+    if isinstance(value, list) and len(value) >= 2 and all(isinstance(x, (int, float)) for x in value[:2]):
         yield value[:2]
     elif isinstance(value, list):
         for child in value:
             yield from coordinates(child)
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--monthly", action="store_true", help="Separate explicit monthly attempt, same total budget")
-    args = parser.parse_args()
-    get = Fetch()
-    meta = get("https://data.cityofchicago.org/api/views/m6dm-c72p/columns.json")
-    columns = {c["fieldName"]: c for c in meta}
-    if columns["trip_start_timestamp"]["dataTypeName"] != "calendar_date":
-        raise ValueError("timestamp semantics changed")
-    if columns["pickup_community_area"]["dataTypeName"] != "number":
-        raise ValueError("area schema changed")
-    known = get(BASE, {"$select":"date_extract_dow(trip_start_timestamp) as dow,date_extract_hh(trip_start_timestamp) as hour", "$where":"trip_start_timestamp = '2022-01-02T12:00:00'", "$limit":1})
-    if len(known) != 1 or integer(known[0]["dow"]) != 0 or integer(known[0]["hour"]) != 12:
-        raise ValueError("weekday/hour extraction mismatch")
-    periods = [PERIOD]
-    if args.monthly:
-        periods = []
-        for month in range(1,13):
-            start = dt.date(2022,month,1)
-            end = dt.date(2022,month+1,1) if month < 12 else dt.date(2023,1,1)
-            periods.append(f"trip_start_timestamp >= '{start}T00:00:00' AND trip_start_timestamp < '{end}T00:00:00'")
-    totals = {}
-    for period in periods:
-        rows = get(BASE, {"$select": SELECT, "$where":period+" AND "+VALID, "$group":GROUP, "$order":"area_id,dow,hour", "$limit":15000})
-        if not isinstance(rows,list) or len(rows)>12936:
-            raise ValueError("invalid aggregate size")
-        seen = set()
-        for row in rows:
-            key = tuple(integer(row[k]) for k in ("area_id","dow","hour"))
-            if key in seen or not (1<=key[0]<=77 and 0<=key[1]<=6 and 0<=key[2]<=23):
-                raise ValueError("invalid or duplicate bucket")
-            seen.add(key)
-            totals[key] = totals.get(key,0)+integer(row["trips"])
-    included = integer(get(BASE,{"$select":"count(*) as n", "$where":PERIOD+" AND "+VALID})[0]["n"])
-    excluded = integer(get(BASE,{"$select":"count(*) as n", "$where":PERIOD+" AND (pickup_community_area IS NULL OR pickup_community_area < 1 OR pickup_community_area > 77)"})[0]["n"])
-    if sum(totals.values()) != included or included == 0:
-        raise ValueError("aggregate/count reconciliation failed or empty source")
+
+def windows(start: dt.date, weeks: int) -> list[tuple[str, int, str, str]]:
+    """Half-open hourly windows (date, hour, start, end) covering whole weeks."""
+    out = []
+    for day in range(weeks * 7):
+        date = start + dt.timedelta(days=day)
+        for hour in range(24):
+            begin = dt.datetime.combine(date, dt.time(hour))
+            end = begin + dt.timedelta(hours=1)
+            out.append((date.isoformat(), hour, begin.isoformat(), end.isoformat()))
+    return out
+
+
+def parse_hour(rows) -> tuple[dict[int, int], int]:
+    """Split one hourly response into {area_id: trips} and trips with no area."""
+    if not isinstance(rows, list):
+        raise ValueError("expected a list of groups")
+    per_area: dict[int, int] = {}
+    excluded = None
+    for row in rows:
+        trips = integer(row["trips"])
+        if row.get("area_id") is None:  # pickups outside Chicago or suppressed
+            if excluded is not None:
+                raise ValueError("duplicate no-area group")
+            excluded = trips
+            continue
+        area_id = integer(row["area_id"])
+        if not 1 <= area_id <= 77:
+            raise ValueError(f"area id out of range: {area_id}")
+        if area_id in per_area:
+            raise ValueError(f"duplicate area group: {area_id}")
+        per_area[area_id] = trips
+    return per_area, excluded or 0
+
+
+def fetch(url: str, params: dict, tries: int = REQUEST_TRIES, pause=time.sleep):
+    """GET JSON through curl with bounded retries."""
+    full = url + ("?" + urllib.parse.urlencode(params) if params else "")
+    command = ["curl", "--fail-with-body", "--silent", "--show-error", "--max-time", str(REQUEST_TIMEOUT), full]
+    problem = ""
+    for attempt in range(tries):
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=REQUEST_TIMEOUT + 5)
+        except subprocess.TimeoutExpired:
+            problem = "curl did not exit"
+        else:
+            if result.returncode == 0:
+                try:
+                    return json.loads(result.stdout)
+                except json.JSONDecodeError as exc:
+                    problem = f"malformed JSON: {exc}"
+            else:
+                problem = result.stderr.decode(errors="replace").strip() or f"curl exit {result.returncode}"
+        if attempt + 1 < tries:
+            pause(1 + attempt)
+    raise SourceUnavailable(problem)
+
+
+def cached(name: str, load):
+    """Return the cached response for name, fetching and storing it if absent."""
+    path = CACHE / f"{name}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    data = load()
+    CACHE.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix(".partial")
+    partial.write_text(json.dumps(data))
+    partial.replace(path)
+    return data
+
+
+def areas_from(rows) -> list[dict]:
+    """Community areas with a bounding-box centre as the weather lookup point."""
     areas = []
-    for row in get(BOUNDARIES,{"$select":"area_num_1,community,the_geom", "$limit":100}):
+    for row in rows:
         area_id = integer(row["area_num_1"])
-        pts = list(coordinates(row["the_geom"]["coordinates"]))
-        if not pts or not all(math.isfinite(x) for p in pts for x in p):
-            raise ValueError("invalid geometry")
-        lon = (min(p[0] for p in pts)+max(p[0] for p in pts))/2
-        lat = (min(p[1] for p in pts)+max(p[1] for p in pts))/2
+        points = list(coordinates(row["the_geom"]["coordinates"]))
+        if not points or not all(math.isfinite(x) for point in points for x in point):
+            raise ValueError(f"invalid geometry for area {area_id}")
+        lon = (min(p[0] for p in points) + max(p[0] for p in points)) / 2
+        lat = (min(p[1] for p in points) + max(p[1] for p in points)) / 2
         if not (41.6 < lat < 42.1 and -88.0 < lon < -87.4):
-            raise ValueError("point outside Chicago bounds")
-        areas.append(dict(area_id=area_id,name=row["community"].title(),lat=lat,lon=lon,coord_source=BOUNDARIES+"; bounding-box center; approximate"))
-    areas.sort(key=lambda a:a["area_id"])
-    if [a["area_id"] for a in areas] != list(range(1,78)):
-        raise ValueError("area coverage mismatch")
-    buckets = [dict(area_id=a,dow=d,hour=h,total_trips=totals.get((a,d,h),0)) for a in range(1,78) for d in range(7) for h in range(24)]
-    manifest = dict(dataset_id="m6dm-c72p",period_start="2022-01-01",period_end="2022-12-31",retrieved_at=dt.datetime.now(dt.timezone.utc).isoformat(),query_text=json.dumps(get.queries, separators=(",",":")),rows_loaded=len(buckets),trips_included=included,trips_excluded_invalid_area=excluded)
-    seed = dict(areas=areas,buckets=buckets,history=manifest)
-    # Publish only after every source and integrity check succeeds.
-    (ROOT / "data").mkdir(parents=True, exist_ok=True)
-    temp = ROOT / "data/seed.json.tmp"
-    temp.write_text(json.dumps(seed,separators=(",",":"))+"\n")
-    temp.replace(ROOT / "data/seed.json")
-    (ROOT / "data/manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")
-    for area in areas:
-        print(f'{area["area_id"]:2} {area["name"]:24} {area["lat"]:.6f} {area["lon"]:.6f}')
-    print(f"PASS: {len(buckets)} buckets; {included} included; {excluded} excluded; {get.size} bytes; {time.monotonic()-get.start:.1f}s")
+            raise ValueError(f"area {area_id} centre outside Chicago bounds")
+        name = row["community"].title()
+        areas.append(
+            {
+                "area_id": area_id,
+                "name": NAME_FIXES.get(name, name),
+                "lat": round(lat, 6),
+                "lon": round(lon, 6),
+                "coord_source": BOUNDARIES + "; bounding-box centre; approximate",
+            }
+        )
+    areas.sort(key=lambda area: area["area_id"])
+    if [area["area_id"] for area in areas] != list(range(1, 78)):
+        raise ValueError("expected community areas 1..77")
+    return areas
+
+
+def load_hour(window):
+    date, hour, start, end = window
+
+    def get():
+        rows = fetch(BASE, {"$query": HOUR_QUERY.format(start=start, end=end)})
+        per_area, _ = parse_hour(rows)  # never cache a response that does not validate
+        if not per_area:
+            # Chicago has pickups in every hour; an empty answer is a bad
+            # response, and caching it would publish an all-zero hour.
+            raise SourceUnavailable("response had no area groups")
+        return rows
+
+    return cached(f"{date}T{hour:02d}", get)
+
+
+def reconcile(wins, hours) -> list[str]:
+    """Check adjacent hourly totals against one independent two-hour count."""
+    problems = []
+    for index in RECONCILE_PAIRS:
+        first, second = wins[index], wins[index + 1]
+        expected = 0
+        for window in (first, second):
+            per_area, no_area = parse_hour(hours[window[:2]])
+            expected += sum(per_area.values()) + no_area
+        rows = fetch(BASE, {"$query": COUNT_QUERY.format(start=first[2], end=second[3])})
+        live = integer(rows[0]["trips"])
+        if live != expected:
+            problems.append(f"{first[2]}..{second[3]}: hourly sum {expected} != live count {live}")
+    return problems
+
+
+def build_seed(areas, wins, hours, retrieved_at: str) -> dict:
+    """Dense seed: one row per (date, hour); trips[i] belongs to area i + 1."""
+    rows, included, excluded = [], 0, 0
+    for date, hour, _, _ in wins:
+        per_area, no_area = parse_hour(hours[(date, hour)])
+        counts = [per_area.get(area_id, 0) for area_id in range(1, 78)]
+        rows.append({"date": date, "hour": hour, "trips": counts})
+        included += sum(counts)
+        excluded += no_area
+    history = {
+        "dataset_id": DATASET_ID,
+        "period_start": wins[0][0],
+        "period_end": wins[-1][0],
+        "retrieved_at": retrieved_at,
+        "query_text": HOUR_QUERY,
+        "rows_loaded": len(rows) * 77,
+        "trips_included": included,
+        "trips_excluded_invalid_area": excluded,
+    }
+    return {"areas": areas, "hours": rows, "history": history}
+
+
+def main() -> int:
+    wins = windows(PERIOD_START, WEEKS)
+    started = time.monotonic()
+    try:
+        areas = areas_from(
+            cached("boundaries", lambda: fetch(BOUNDARIES, {"$select": "area_num_1,community,the_geom", "$limit": 100}))
+        )
+    except SourceUnavailable as exc:
+        print(f"boundaries unavailable ({exc}); nothing published, rerun to retry")
+        return 1
+
+    hours, failed = {}, 0
+    print(f"{len(wins)} hourly windows, {WORKERS} workers, cache {CACHE}", flush=True)
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = {pool.submit(load_hour, window): window for window in wins}
+        for done, future in enumerate(as_completed(futures), start=1):
+            window = futures[future]
+            try:
+                hours[window[:2]] = future.result()
+            except SourceUnavailable as exc:
+                failed += 1
+                print(f"  failed {window[2]}: {str(exc).splitlines()[0] if str(exc) else 'no detail'}", flush=True)
+                if failed > MAX_FAILED:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    break
+            if done % 48 == 0:
+                print(f"  {done}/{len(wins)} ({time.monotonic() - started:.0f}s, {failed} failed)", flush=True)
+
+    if len(hours) < len(wins):
+        print(f"{len(hours)}/{len(wins)} windows cached; nothing published. Rerun `make acquire` to resume.")
+        return 1
+
+    try:
+        problems = reconcile(wins, hours)
+    except SourceUnavailable as exc:
+        print(f"reconciliation could not run ({exc}); nothing published. Rerun `make acquire`.")
+        return 1
+    if problems:
+        print("reconciliation failed; nothing published:")
+        for problem in problems:
+            print("  " + problem)
+        return 1
+
+    seed = build_seed(areas, wins, hours, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    manifest = dict(seed["history"], source_endpoint=BASE, windows=len(wins), reconciled_pairs=len(RECONCILE_PAIRS))
+    SEED.parent.mkdir(parents=True, exist_ok=True)
+    partial = SEED.with_suffix(".partial")
+    partial.write_text(json.dumps(seed, separators=(",", ":")) + "\n")
+    partial.replace(SEED)
+    MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
+    history = seed["history"]
+    print(
+        f"PASS: {history['period_start']}..{history['period_end']}, {history['rows_loaded']} rows, "
+        f"{history['trips_included']} trips, {history['trips_excluded_invalid_area']} without an area, "
+        f"{time.monotonic() - started:.0f}s"
+    )
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
