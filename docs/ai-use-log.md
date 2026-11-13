@@ -141,6 +141,8 @@ Checked from outside (actual results): the page returns 200 with `Cache-Control:
 
 Then removed the unused function route (`api/`, `backend/serverless/`, `data/seed.go`) and pointed the docs at the live URL. Not verified: behaviour after the container sleeps (first request after five idle minutes).
 
+Later the same day the Vercel copy showed "unavailable" on every request while local runs worked. The AI sampled the live API (12 of 12 unavailable, each in about 0.5 s, so an error answer rather than a timeout) and compared a direct Open-Meteo call from the user's machine (200). It suggested the free tier's per-IP limit as the likely cause but did not claim it until the user pasted the Vercel logs: `weather status 429`, including the first request of a fresh instance. The user then deployed the same image on Render; the AI checked it from outside: 8 of 8 requests returned live readings, the page returned 200, an unknown path 404. A server-side weather cache was proposed and set aside, because it cannot fix a limit exhausted by other tenants.
+
 ## Implementation start — 2026-11-12
 Tool: Codex, using karpathy-engineering and project SQL/Go/UI skills. User requested implementation of the approved plan.
 Historical discussion record (recorded now, not backdated): user rejected 28-day history, one-area weather, and strict all-candidate validity; accepted full-year aggregates, top-five evaluation and rank-prefix. The denominator claim was corrected: common denominator does not change ordering. No historical tests are claimed.

@@ -8,7 +8,7 @@ The rule is deliberately small. Take the five community areas with the most hist
 
 The app does not see live demand, drivers, wait times or cancellations, and says so on the page.
 
-**Live:** https://operations-control-room.vercel.app
+**Live:** https://operations-control-room.onrender.com (free instance: the first visit after it has been idle takes about a minute to wake). Mirror: https://operations-control-room.vercel.app, which often shows "unavailable"; see [Deploying](#deploying).
 
 ![Hold state with live weather](docs/evidence/screenshots/hold-live-weather.png)
 
@@ -264,11 +264,16 @@ make test
 
 ## Deploying
 
-Live at **https://operations-control-room.vercel.app**, served by Vercel from the `Dockerfile`.
+Both live copies run the same `Dockerfile` image: the server from `make run`, listening on `$PORT`, with the database built into the image. Every push to `main` redeploys both.
 
-The `Dockerfile` runs the same server as `make run`, listens on `$PORT`, and has the database built into the image. `vercel.json` declares that image as a single container service and routes all traffic to it; the project sets `PORT=8080`. Every push to `main` redeploys. Any other container host (Render, Fly, Cloud Run) can run the same image unchanged.
+| Host | URL | Notes |
+|---|---|---|
+| Render | https://operations-control-room.onrender.com | Primary. Free instance; sleeps after about 15 idle minutes and takes about a minute to wake |
+| Vercel | https://operations-control-room.vercel.app | `vercel.json` runs the image as one container service (beta); project setting `PORT=8080` |
 
-Vercel's container runtime is in beta. Instances sleep after five minutes without traffic, so the first request after a pause is slower.
+**Why the Vercel copy often says "unavailable".** Open-Meteo's free tier limits requests per IP address, and outgoing traffic from Vercel shares addresses with many other projects. Its logs show `weather status 429` (too many requests), including on the first request after a fresh start, so the limit is used up by other tenants, not by this app. The page then reports "unavailable: the weather source returned no usable reading" rather than guessing, which is the intended behaviour. The same image on Render, and any local run, gets live readings.
+
+Any other container host (Fly, Cloud Run) can run the image unchanged.
 
 ## Assumptions, trade-offs and limits
 
@@ -278,6 +283,7 @@ Vercel's container runtime is in beta. Instances sleep after five minutes withou
 - **Hour edges are approximate.** The publisher rounds start times to 15 minutes.
 - **Weather is modeled, not observed**, read at each area's bounding-box centre, and can include snow.
 - **Only the top five areas are evaluated.** Rain in a sixth, quieter area produces "hold".
+- **The free weather API is rate-limited per IP address.** On a shared host it can refuse requests (HTTP 429); the page then shows "unavailable". See [Deploying](#deploying).
 - **One weather request per assessment, no retry on the server.** A single slow answer from Open-Meteo gives "unavailable" until the page re-checks a minute later.
 - **Scope left out on purpose:** auth, maps, history of past recommendations, caching, server-side retries. None would improve the one decision.
 

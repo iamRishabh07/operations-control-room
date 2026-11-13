@@ -63,4 +63,4 @@ Paths are from the repository root. "README" means a section of `README.md`.
 | Assumptions, trade-offs, limitations | README "Assumptions, trade-offs and limits"; `docs/decisions.md` |
 | AI-use disclosure: tools, accepted, rejected, validation, wrong assumptions, hardest parts | README "AI use", one heading per question; `docs/ai-use-log.md` |
 | Runs locally with one or two commands | `make setup`, `make run` |
-| Deployment (optional) | https://operations-control-room.vercel.app, from `Dockerfile` and `vercel.json`; README "Deploying" |
+| Deployment (optional) | https://operations-control-room.onrender.com (mirror on Vercel), both from `Dockerfile`; README "Deploying" |

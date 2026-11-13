@@ -41,4 +41,4 @@ One page: the recommendation with its evidence and caveat, the five areas with h
 
 ## Not done
 
-Deployed at https://operations-control-room.vercel.app from the container image. The action state was first seen on real weather on 12 November 2026 (0.20 mm modeled at the busiest areas); before that it had only been exercised with simulated weather.
+Deployed from the container image at https://operations-control-room.onrender.com, with a mirror on Vercel that Open-Meteo often rate-limits. The action state was first seen on real weather on 12 November 2026 (0.20 mm modeled at the busiest areas); before that it had only been exercised with simulated weather.
